@@ -1,9 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 
-// Пример работы с базой: читаем, добавляем и удаляем свои записи.
-// Таблица `entries` создаётся в supabase/schema.sql. Переделай это под свою идею:
-// вопросы для квиза, привычки, места, карточки — что угодно.
 type Entry = {
   id: string;
   title: string;
@@ -20,6 +17,7 @@ export function Entries({ userEmail }: { userEmail: string }) {
       .from('entries')
       .select('id, title, created_at')
       .order('created_at', { ascending: false });
+
     if (error) setError(error.message);
     else setEntries(data ?? []);
   }
@@ -31,45 +29,56 @@ export function Entries({ userEmail }: { userEmail: string }) {
   async function add(e: React.FormEvent) {
     e.preventDefault();
     if (!title.trim()) return;
+
     const { error } = await supabase.from('entries').insert({ title: title.trim() });
-    if (error) setError(error.message);
-    else {
-      setTitle('');
-      load();
+
+    if (error) {
+      setError(error.message);
+      return;
     }
+
+    setError('');
+    setTitle('');
+    load();
   }
 
   async function remove(id: string) {
     const { error } = await supabase.from('entries').delete().eq('id', id);
-    if (error) setError(error.message);
-    else load();
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setError('');
+    load();
   }
 
   return (
     <section className="card">
-      <p className="hello">Привет, {userEmail} 👋</p>
-      <h2>Мои записи</h2>
+      <p className="hello">Signed in as {userEmail}</p>
+      <h2>My entries</h2>
 
       <form onSubmit={add} className="form-row">
         <input
-          placeholder="что добавить…"
+          placeholder="What would you like to add?"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
-        <button type="submit">Добавить</button>
+        <button type="submit">Add</button>
       </form>
 
       {error && <p className="message">{error}</p>}
 
       {entries.length === 0 ? (
-        <p className="empty">Пока пусто. Добавь первую запись 👆</p>
+        <p className="empty">Nothing here yet. Add your first entry.</p>
       ) : (
         <ul className="list">
-          {entries.map((it) => (
-            <li key={it.id}>
-              <span>{it.title}</span>
-              <button className="ghost small" onClick={() => remove(it.id)}>
-                удалить
+          {entries.map((entry) => (
+            <li key={entry.id}>
+              <span>{entry.title}</span>
+              <button className="ghost small" onClick={() => remove(entry.id)}>
+                Delete
               </button>
             </li>
           ))}

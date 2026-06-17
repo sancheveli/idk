@@ -1,63 +1,289 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 
-// Вход и регистрация по email + паролю. Это пример — Codex поможет улучшить (Google-вход и т.д.).
-export function Auth() {
+type AuthMode = 'signin' | 'signup' | 'reset';
+
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+type AuthProps = {
+  onAuthenticated?: (session: Session) => void;
+};
+
+function getPasswordIssues(password: string) {
+  const issues = [];
+  if (password.length < 8) issues.push('8+ characters');
+  if (!/[A-Z]/.test(password)) issues.push('one uppercase letter');
+  if (!/[a-z]/.test(password)) issues.push('one lowercase letter');
+  if (!/[0-9]/.test(password)) issues.push('one number');
+  return issues;
+}
+
+export function Auth({ onAuthenticated }: AuthProps) {
+  const [mode, setMode] = useState<AuthMode>('signup');
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [message, setMessage] = useState('');
+  const [messageType, setMessageType] = useState<'error' | 'success'>('error');
   const [busy, setBusy] = useState(false);
+
+  const passwordIssues = useMemo(() => getPasswordIssues(password), [password]);
+  const isSignup = mode === 'signup';
+  const isReset = mode === 'reset';
+
+  function showMessage(text: string, type: 'error' | 'success' = 'error') {
+    setMessage(text);
+    setMessageType(type);
+  }
+
+  function switchMode(nextMode: AuthMode) {
+    setMode(nextMode);
+    setMessage('');
+    setPassword('');
+    setConfirmPassword('');
+  }
+
+  function validate() {
+    const cleanEmail = email.trim();
+    if (!emailPattern.test(cleanEmail)) {
+      showMessage('Enter a valid email address.');
+      return false;
+    }
+
+    if (isReset) return true;
+
+    if (isSignup && name.trim().length < 2) {
+      showMessage('Enter your name so your account has a profile label.');
+      return false;
+    }
+
+    if (isSignup && passwordIssues.length > 0) {
+      showMessage(`Your password still needs ${passwordIssues.join(', ')}.`);
+      return false;
+    }
+
+    if (isSignup && password !== confirmPassword) {
+      showMessage('Passwords do not match.');
+      return false;
+    }
+
+    if (!isSignup && password.length < 6) {
+      showMessage('Enter your password.');
+      return false;
+    }
+
+    return true;
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!validate()) return;
+
     setBusy(true);
     setMessage('');
+
+    const cleanEmail = email.trim().toLowerCase();
+
     try {
-      const fn =
-        mode === 'signup'
-          ? supabase.auth.signUp({ email, password })
-          : supabase.auth.signInWithPassword({ email, password });
-      const { error } = await fn;
-      if (error) setMessage(error.message);
-      else if (mode === 'signup') setMessage('Готово! Проверь почту, если нужна подтверждалка.');
+      if (mode === 'signup') {
+        const { data, error } = await supabase.auth.signUp({
+          email: cleanEmail,
+          password,
+          options: {
+            data: {
+              full_name: name.trim(),
+            },
+          },
+        });
+
+        if (error) {
+          showMessage(error.message);
+          return;
+        }
+
+        if (data.session) {
+          onAuthenticated?.(data.session);
+          return;
+        }
+
+        showMessage('Account created. Check your email if confirmation is enabled.', 'success');
+        setPassword('');
+        setConfirmPassword('');
+        return;
+      }
+
+      if (mode === 'reset') {
+        const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+          redirectTo: window.location.origin,
+        });
+
+        if (error) {
+          showMessage(error.message);
+          return;
+        }
+
+        showMessage('Password reset link sent. Check your inbox.', 'success');
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password,
+      });
+
+      if (error) {
+        showMessage(error.message);
+        return;
+      }
+
+      if (data.session) {
+        onAuthenticated?.(data.session);
+      } else {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData.session) onAuthenticated?.(sessionData.session);
+      }
     } catch {
-      setMessage('Что-то пошло не так. Попробуй ещё раз.');
+      showMessage('Something went wrong. Please try again.');
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <section className="card">
-      <h2>{mode === 'signin' ? 'Вход' : 'Регистрация'}</h2>
-      <form onSubmit={handleSubmit} className="form">
-        <input
-          type="email"
-          placeholder="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          required
-        />
-        <input
-          type="password"
-          placeholder="пароль (6+ символов)"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          minLength={6}
-          required
-        />
-        <button type="submit" disabled={busy}>
-          {busy ? '…' : mode === 'signin' ? 'Войти' : 'Создать аккаунт'}
-        </button>
-      </form>
-      {message && <p className="message">{message}</p>}
-      <button
-        className="ghost"
-        onClick={() => setMode(mode === 'signin' ? 'signup' : 'signin')}
-      >
-        {mode === 'signin' ? 'Нет аккаунта? Зарегистрируйся' : 'Уже есть аккаунт? Войти'}
-      </button>
+    <section className="auth-shell">
+      <div className="auth-panel">
+        <div className="auth-heading">
+          <p className="eyebrow">Secure account access</p>
+          <h2>
+            {mode === 'signup'
+              ? 'Create your account'
+              : mode === 'signin'
+                ? 'Welcome back'
+                : 'Reset your password'}
+          </h2>
+          <p>
+            {mode === 'signup'
+              ? 'Register with email and a strong password to start saving your data.'
+              : mode === 'signin'
+                ? 'Sign in to continue to your workspace.'
+                : 'Enter your account email and we will send a recovery link.'}
+          </p>
+        </div>
+
+        <div className="auth-tabs" aria-label="Authentication mode">
+          <button
+            type="button"
+            className={mode === 'signup' ? 'active' : ''}
+            onClick={() => switchMode('signup')}
+          >
+            Register
+          </button>
+          <button
+            type="button"
+            className={mode === 'signin' ? 'active' : ''}
+            onClick={() => switchMode('signin')}
+          >
+            Sign in
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="auth-form">
+          {isSignup && (
+            <label>
+              Name
+              <input
+                type="text"
+                autoComplete="name"
+                placeholder="Your name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+              />
+            </label>
+          )}
+
+          <label>
+            Email
+            <input
+              type="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </label>
+
+          {!isReset && (
+            <label>
+              Password
+              <input
+                type="password"
+                autoComplete={isSignup ? 'new-password' : 'current-password'}
+                placeholder={isSignup ? 'Create a strong password' : 'Your password'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                minLength={isSignup ? 8 : 6}
+                required
+              />
+            </label>
+          )}
+
+          {isSignup && (
+            <>
+              <label>
+                Confirm password
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder="Repeat your password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  minLength={8}
+                  required
+                />
+              </label>
+
+              <div className="password-rules">
+                {['8+ characters', 'one uppercase letter', 'one lowercase letter', 'one number'].map(
+                  (rule) => (
+                    <span key={rule} className={!passwordIssues.includes(rule) ? 'met' : ''}>
+                      {rule}
+                    </span>
+                  ),
+                )}
+              </div>
+            </>
+          )}
+
+          {message && <p className={`auth-message ${messageType}`}>{message}</p>}
+
+          <button type="submit" className="primary-action" disabled={busy}>
+            {busy
+              ? 'Please wait...'
+              : mode === 'signup'
+                ? 'Create account'
+                : mode === 'signin'
+                  ? 'Sign in'
+                  : 'Send reset link'}
+          </button>
+        </form>
+
+        <div className="auth-links">
+          {mode === 'signin' && (
+            <button type="button" className="text-button" onClick={() => switchMode('reset')}>
+              Forgot password?
+            </button>
+          )}
+          {mode === 'reset' && (
+            <button type="button" className="text-button" onClick={() => switchMode('signin')}>
+              Back to sign in
+            </button>
+          )}
+        </div>
+      </div>
     </section>
   );
 }
