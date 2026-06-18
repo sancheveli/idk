@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 type LobbyProps = {
   nickname: string;
   userId: string;
+  onMenuOpenChange?: (open: boolean) => void;
 };
 
 type Position = {
@@ -11,19 +12,21 @@ type Position = {
 };
 
 type GamePhase = 'lobby' | 'arena';
+type ArenaMode = 'main' | 'duel';
 type Direction = 'front' | 'back' | 'left' | 'right';
+type MenuPanel = 'main' | 'gamemods' | 'settings';
 type ServerEvent =
-  | 'You will get a sword'
+  | 'Someone will get a sword'
   | 'Something will explode'
   | 'SURVIVE THE DOOMSDAY'
   | 'Zombie apocalypse'
-  | 'You must battle to death'
+  | 'BATTLE TO DEATH'
   | 'FREEZE'
-  | 'You will find out you are rapid'
-  | 'You will get your leg lost'
-  | 'You will turn blue'
-  | 'You will turn red'
-  | 'You will turn green';
+  | 'Someone will find out they are rapid'
+  | 'Someone will get their leg lost'
+  | 'Someone will turn blue'
+  | 'Someone will turn red'
+  | 'Someone will turn green';
 type PlayerSnapshot = {
   clientId: string;
   userId: string;
@@ -53,6 +56,8 @@ type RoundSnapshot = GameStateSnapshot & {
   timeLeft: number;
   arenaElapsed: number;
   roundNumber: number;
+  eventSlot: number;
+  currentEventStartedAt: number;
   targetedEffects: {
     sword: string[];
     rapid: string[];
@@ -66,7 +71,15 @@ type RoundSnapshot = GameStateSnapshot & {
   fireHazards: FireHazard[];
   doomsdayStrikes: DoomsdayStrike[];
   zombies: Zombie[];
-  battleNpcs: BattleNpc[];
+};
+type BotSnapshot = PlayerSnapshot & {
+  kind: 'bot';
+  isRapid: boolean;
+};
+type DuelState = {
+  id: string;
+  fighters: [string, string];
+  startedAt: number;
 };
 type FireHazard = {
   id: string;
@@ -88,14 +101,12 @@ type Zombie = {
   position: Position;
   targetClientId: string;
   deadAt?: number;
-};
-type BattleNpc = {
-  id: string;
-  spawnedAt: number;
-  position: Position;
-  targetClientId: string;
-  direction: Direction;
-  swordSwinging: boolean;
+  source?: 'event' | 'king';
+  kind?: 'minion' | 'king';
+  health?: number;
+  maxHealth?: number;
+  direction?: Direction;
+  swordSwinging?: boolean;
 };
 type Bounds = {
   x: number;
@@ -107,13 +118,15 @@ type BoundsResolver = Bounds | ((width: number, height: number) => Bounds);
 
 const baseStep = 14;
 const rapidStep = 24;
-const worldWidth = 1080;
-const worldHeight = 560;
+const worldWidth = 1155;
+const worldHeight = 635;
 const lobbyDuration = 30;
-const arenaDuration = 180;
-const roundDuration = lobbyDuration + arenaDuration;
-const eventInterval = 10;
-const arenaEventSlots = Math.floor(arenaDuration / eventInterval) - 1;
+const eventInterval = 7;
+const postDoomsdayEventDelay = 20;
+const deathReturnDelay = 2200;
+const eventTimelineLimit = 900;
+const lobbyMusicSrc = '/audio/lobby-music.mp3';
+const arenaMusicSrc = '/audio/arena-music.mp3';
 const lobbySpawnSlots: Position[] = [
   { x: 500, y: 330 },
   { x: 414, y: 330 },
@@ -130,21 +143,38 @@ const arenaSpawnSlots: Position[] = [
   { x: 380, y: 430 },
   { x: 620, y: 430 },
 ];
+const initialBotIds = ['bot-1', 'bot-2', 'bot-3'];
+const botIds = initialBotIds;
+const botNames: Record<string, string> = {
+  'bot-1': 'Bot 1',
+  'bot-2': 'Bot 2',
+  'bot-3': 'Bot 3',
+};
+const botSpawnSlots: Record<string, Position> = {
+  'bot-1': { x: 240, y: 160 },
+  'bot-2': { x: 930, y: 178 },
+  'bot-3': { x: 880, y: 505 },
+};
+const duelSpawnSlots: [Position, Position] = [
+  { x: 410, y: 360 },
+  { x: 745, y: 360 },
+];
+const postDuelPlayerSpawn: Position = { x: worldWidth / 2, y: worldHeight - 58 };
 const shopItems = ['1,000 Coins', '10,000 Coins', '25,000 Coins', '50,000 Coins', '75,000 Coins', '100,000 Coins'];
 const serverAnnouncements: ServerEvent[] = [
-  'You will get a sword',
+  'Someone will get a sword',
   'Something will explode',
   'SURVIVE THE DOOMSDAY',
   'Zombie apocalypse',
-  'You must battle to death',
+  'BATTLE TO DEATH',
   'FREEZE',
-  'You will find out you are rapid',
-  'You will get your leg lost',
-  'You will turn blue',
-  'You will turn red',
-  'You will turn green',
+  'Someone will find out they are rapid',
+  'Someone will get their leg lost',
+  'Someone will turn blue',
+  'Someone will turn red',
+  'Someone will turn green',
 ];
-const explosiveObjects = ['arena-wall-top', 'arena-wall-bottom', 'arena-wall-left', 'arena-wall-right', 'fort-red', 'fort-blue', 'column-one', 'column-two', 'column-three'];
+const explosiveObjects = ['fort-red', 'fort-blue', 'column-one', 'column-two', 'column-three', 'arena-tree-one', 'arena-tree-two', 'arena-tree-three', 'arena-tree-four'];
 const fireDuration = 12000;
 const fireDamage = 30;
 const doomsdayDamage = 60;
@@ -152,15 +182,31 @@ const doomsdayInterval = 2000;
 const doomsdayWarningDuration = 1000;
 const doomsdayPostHitDuration = 900;
 const doomsdayRadius = 84;
-const doomsdayBaseWidth = 1080;
-const doomsdayBaseHeight = 560;
+const doomsdayBaseWidth = 1155;
+const doomsdayBaseHeight = 635;
 const zombieDamage = 50;
 const zombieSpeed = 28;
-const battleNpcMaxHealth = 75;
-const battleNpcDamage = 10;
-const battleNpcSpeed = 34;
-const battleNpcSwingInterval = 900;
-const freezeDuration = 20000;
+const zombieKingSpeed = 18;
+const zombieKingMaxHealth = 500;
+const zombieMinionMaxHealth = 50;
+const zombieKingSpawnInterval = 15000;
+const zombieKingAttackDistance = 112;
+const zombieKingSwordCooldown = 250;
+const swordDamage = 18;
+const gunDamage = 5;
+const botMaxHealth = 120;
+const botSpeed = 22;
+const botRapidSpeed = 32;
+const botFleeSpeedMultiplier = 1.55;
+const botFleeDistance = 178;
+const botZombieFleeDistance = 220;
+const botMovementSegmentDistance = 200;
+const botSideEscapeDistance = 200;
+const botAttackDistance = 118;
+const botSwingInterval = 520;
+const duelReturnGraceDuration = 1600;
+const playerEventEffectDuration = 10000;
+const freezeDuration = eventInterval * 1000;
 const zombiePathCellSize = 28;
 const zombiePathMinX = 1;
 const zombiePathMaxX = Math.floor((worldWidth - 34) / zombiePathCellSize);
@@ -176,15 +222,19 @@ const desktopFireBounds: Record<string, BoundsResolver> = {
   'column-one': { x: 386, y: 160, width: 58, height: 58 },
   'column-two': (width, height) => ({ x: width - 444, y: height - 212, width: 58, height: 58 }),
   'column-three': (width, height) => ({ x: width / 2 - 29, y: height - 190, width: 58, height: 58 }),
+  'arena-tree-one': { x: 106, y: 94, width: 70, height: 92 },
+  'arena-tree-two': (width) => ({ x: width - 174, y: 106, width: 70, height: 92 }),
+  'arena-tree-three': (_width, height) => ({ x: 136, y: height - 168, width: 70, height: 92 }),
+  'arena-tree-four': (width, height) => ({ x: width - 228, y: height - 176, width: 70, height: 92 }),
 };
 const lobbyObstacleBounds: Bounds[] = [
-  { x: 421, y: 98, width: 238, height: 144 },
-  { x: 60, y: 316, width: 98, height: 190 },
-  { x: 922, y: 316, width: 98, height: 190 },
-  { x: 220, y: 40, width: 98, height: 186 },
-  { x: 762, y: 334, width: 98, height: 154 },
-  { x: 281, y: 374, width: 80, height: 122 },
-  { x: 724, y: 382, width: 80, height: 122 },
+  { x: 450, y: 78, width: 254, height: 164 },
+  { x: 60, y: 391, width: 98, height: 186 },
+  { x: 997, y: 391, width: 98, height: 186 },
+  { x: 220, y: 40, width: 98, height: 218 },
+  { x: 827, y: 377, width: 98, height: 200 },
+  { x: 281, y: 439, width: 80, height: 122 },
+  { x: 800, y: 447, width: 80, height: 122 },
   { x: 411, y: 84, width: 80, height: 90 },
   { x: 630, y: 108, width: 80, height: 90 },
 ];
@@ -213,36 +263,15 @@ function hashText(text: string) {
 }
 
 function getDeterministicEvent(serverId: string, roundNumber: number, eventSlot: number, excludedEvents: ServerEvent[] = []) {
-  if (eventSlot === getDeterministicDoomsdaySlot(serverId, roundNumber)) return 'SURVIVE THE DOOMSDAY';
-  if (eventSlot === getDeterministicZombieSlot(serverId, roundNumber)) return 'Zombie apocalypse';
-  if (eventSlot === getDeterministicBattleNpcSlot(serverId, roundNumber)) return 'You must battle to death';
+  if (eventSlot > 0 && eventSlot % 8 === 0) return 'SURVIVE THE DOOMSDAY';
+  if (eventSlot > 0 && eventSlot % 9 === 0) return 'BATTLE TO DEATH';
+  if (eventSlot > 0 && eventSlot % 6 === 0) return 'Zombie apocalypse';
 
-  const reservedEvents: ServerEvent[] = ['SURVIVE THE DOOMSDAY', 'Zombie apocalypse', 'You must battle to death'];
+  const reservedEvents: ServerEvent[] = ['SURVIVE THE DOOMSDAY', 'Zombie apocalypse', 'BATTLE TO DEATH'];
   const unavailableEvents = new Set<ServerEvent>([...reservedEvents, ...excludedEvents]);
   const availableEvents = serverAnnouncements.filter((event) => !unavailableEvents.has(event));
   const eventIndex = hashText(`${serverId}:${roundNumber}:${eventSlot}:event`) % availableEvents.length;
   return availableEvents[eventIndex];
-}
-
-function getDeterministicDoomsdaySlot(serverId: string, roundNumber: number) {
-  return (hashText(`${serverId}:${roundNumber}:doom-slot`) % arenaEventSlots) + 1;
-}
-
-function getDeterministicZombieSlot(serverId: string, roundNumber: number) {
-  const doomsdaySlot = getDeterministicDoomsdaySlot(serverId, roundNumber);
-  const zombieSlot = (hashText(`${serverId}:${roundNumber}:zombie-slot`) % arenaEventSlots) + 1;
-  return zombieSlot === doomsdaySlot ? (zombieSlot % arenaEventSlots) + 1 : zombieSlot;
-}
-
-function getDeterministicBattleNpcSlot(serverId: string, roundNumber: number) {
-  const reservedSlots = new Set([getDeterministicDoomsdaySlot(serverId, roundNumber), getDeterministicZombieSlot(serverId, roundNumber)]);
-  let battleSlot = (hashText(`${serverId}:${roundNumber}:battle-npc-slot`) % arenaEventSlots) + 1;
-
-  while (reservedSlots.has(battleSlot)) {
-    battleSlot = (battleSlot % arenaEventSlots) + 1;
-  }
-
-  return battleSlot;
 }
 
 function getDeterministicExplosiveObject(serverId: string, roundNumber: number, eventSlot: number, usedObjects: string[]) {
@@ -274,6 +303,16 @@ function getActiveObjectBounds(hiddenObjectIds: string[]) {
   const hiddenObjects = new Set(hiddenObjectIds);
 
   return explosiveObjects
+    .filter((objectId) => !hiddenObjects.has(objectId))
+    .map((objectId) => getBaseObjectBounds(objectId))
+    .filter((bounds): bounds is Bounds => Boolean(bounds));
+}
+
+function getBotObjectBounds(hiddenObjectIds: string[]) {
+  const hiddenObjects = new Set(hiddenObjectIds);
+
+  return explosiveObjects
+    .filter((objectId) => !objectId.startsWith('arena-tree-'))
     .filter((objectId) => !hiddenObjects.has(objectId))
     .map((objectId) => getBaseObjectBounds(objectId))
     .filter((bounds): bounds is Bounds => Boolean(bounds));
@@ -320,7 +359,17 @@ function isZombiePathCellInBounds(cell: Position) {
 }
 
 function isZombiePathCellOpen(cell: Position, obstacleBounds: Bounds[]) {
-  return !collidesCharacterWithBounds(getZombiePathWorldPosition(cell), obstacleBounds);
+  const position = getZombiePathWorldPosition(cell);
+  const pathBox = {
+    left: position.x - 14,
+    right: position.x + 14,
+    top: position.y - 42,
+    bottom: position.y + 8,
+  };
+
+  return !obstacleBounds.some((bound) => {
+    return pathBox.left < bound.x + bound.width && pathBox.right > bound.x && pathBox.top < bound.y + bound.height && pathBox.bottom > bound.y;
+  });
 }
 
 function getNearestOpenZombieCell(position: Position, obstacleBounds: Bounds[]) {
@@ -416,33 +465,17 @@ function getZombiePath(start: Position, target: Position, obstacleBounds: Bounds
   return [start];
 }
 
-function getDeterministicDoomsdayTarget(serverId: string, roundNumber: number, eventSlot: number, strikeIndex: number, usedObjects: string[]) {
-  const availableObjects = explosiveObjects.filter((objectId) => !usedObjects.includes(objectId));
-  if (availableObjects.length === 0) return undefined;
-
-  const targetIndex = hashText(`${serverId}:${roundNumber}:${eventSlot}:${strikeIndex}:doom-target`) % availableObjects.length;
-  return availableObjects[targetIndex];
-}
-
 function getDeterministicDoomsdayStrike(
-  serverId: string,
   roundNumber: number,
   eventSlot: number,
   strikeIndex: number,
   startedAt: number,
-  usedObjects: string[],
+  targetPosition: Position,
 ): DoomsdayStrike {
-  const targetObject = getDeterministicDoomsdayTarget(serverId, roundNumber, eventSlot, strikeIndex, usedObjects);
-  const targetBounds = targetObject ? getBaseObjectBounds(targetObject) : undefined;
-  const xHash = hashText(`${serverId}:${roundNumber}:${eventSlot}:${strikeIndex}:doom-x`);
-  const yHash = hashText(`${serverId}:${roundNumber}:${eventSlot}:${strikeIndex}:doom-y`);
-  const x = targetBounds ? targetBounds.x + targetBounds.width / 2 : 70 + (xHash % 940);
-  const y = targetBounds ? targetBounds.y + targetBounds.height / 2 : 95 + (yHash % 395);
-
   return {
     id: `${roundNumber}-${eventSlot}-${strikeIndex}`,
-    x,
-    y,
+    x: targetPosition.x,
+    y: targetPosition.y,
     radius: doomsdayRadius,
     startedAt,
     hitAt: startedAt + doomsdayWarningDuration,
@@ -455,8 +488,24 @@ function getDeterministicTarget(clientIds: string[], serverId: string, roundNumb
   return clientIds[targetIndex];
 }
 
-function getPlayerByClientId(players: PlayerSnapshot[], clientId: string) {
-  return players.find((player) => player.clientId === clientId);
+function getNearestAliveStickman(position: Position, players: PlayerSnapshot[]) {
+  return players
+    .filter((player) => player.phase === 'arena' && !player.isDead)
+    .sort((a, b) => Math.hypot(a.position.x - position.x, a.position.y - position.y) - Math.hypot(b.position.x - position.x, b.position.y - position.y))[0];
+}
+
+function isBotClientId(clientId: string) {
+  return clientId.startsWith('bot-');
+}
+
+function getPositionAt(history: Array<{ position: Position; recordedAt: number }>, targetTime: number, fallback: Position) {
+  let closest = history[0];
+
+  history.forEach((entry) => {
+    if (entry.recordedAt <= targetTime) closest = entry;
+  });
+
+  return closest?.position ?? fallback;
 }
 
 function getDeterministicZombieSpawn(serverId: string, roundNumber: number, eventSlot: number, targetClientId: string, clientIds: string[]) {
@@ -503,29 +552,113 @@ function getZombiePosition(spawn: Position, target: Position, elapsedMs: number,
   return getPathChasePosition(spawn, target, elapsedMs, obstacleBounds, zombieSpeed);
 }
 
-function getDeterministicBattleNpcSpawn(serverId: string, roundNumber: number, eventSlot: number, targetClientId: string, clientIds: string[]) {
-  const targetSpawn = getSpawnSlot('arena', targetClientId, clientIds);
-  const side = hashText(`${serverId}:${roundNumber}:${eventSlot}:${targetClientId}:battle-side`) % 4;
-  const distance = 124;
-  const offsets = [
-    { x: distance, y: 0 },
-    { x: -distance, y: 0 },
-    { x: 0, y: distance },
-    { x: 0, y: -distance },
-  ];
-  const offset = offsets[side];
-
-  return {
-    x: clamp(targetSpawn.x + offset.x, 34, worldWidth - 34),
-    y: clamp(targetSpawn.y + offset.y, 88, worldHeight - 34),
-  };
-}
-
 function getDirectionToward(from: Position, to: Position): Direction {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
 
   return Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'front' : 'back';
+}
+
+function getDirectionVector(nextDirection: Direction) {
+  if (nextDirection === 'left') return { x: -1, y: 0 };
+  if (nextDirection === 'right') return { x: 1, y: 0 };
+  if (nextDirection === 'back') return { x: 0, y: -1 };
+  return { x: 0, y: 1 };
+}
+
+function getOpenStepPosition(origin: Position, desiredTarget: Position, speed: number, obstacleBounds: Bounds[], seed: string) {
+  const dx = desiredTarget.x - origin.x;
+  const dy = desiredTarget.y - origin.y;
+  const distance = Math.hypot(dx, dy);
+  const baseAngle = distance > 0 ? Math.atan2(dy, dx) : ((hashText(seed) % 360) * Math.PI) / 180;
+  const nearEdge = origin.x < 78 || origin.x > worldWidth - 78 || origin.y < 124 || origin.y > worldHeight - 78;
+  const centerAngle = Math.atan2(worldHeight / 2 - origin.y, worldWidth / 2 - origin.x);
+  const angleOffsets = [0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, (Math.PI * 3) / 4, (-Math.PI * 3) / 4, Math.PI];
+  const seedOffset = ((hashText(`${seed}:offset`) % 360) * Math.PI) / 180;
+  const candidateAngles = [
+    ...(nearEdge ? [centerAngle, centerAngle + Math.PI / 5, centerAngle - Math.PI / 5] : []),
+    ...angleOffsets.map((offset) => baseAngle + offset),
+    ...angleOffsets.map((offset) => seedOffset + offset),
+  ];
+
+  for (const angle of candidateAngles) {
+    const candidate = {
+      x: clamp(origin.x + Math.cos(angle) * speed, 34, worldWidth - 34),
+      y: clamp(origin.y + Math.sin(angle) * speed, 88, worldHeight - 34),
+    };
+
+    const actuallyMoved = Math.hypot(candidate.x - origin.x, candidate.y - origin.y) > 2;
+    if (actuallyMoved && !collidesCharacterWithBounds(candidate, obstacleBounds)) return candidate;
+  }
+
+  return origin;
+}
+
+function getPathAwareStepPosition(origin: Position, desiredTarget: Position, speed: number, obstacleBounds: Bounds[], seed: string) {
+  const dx = desiredTarget.x - origin.x;
+  const dy = desiredTarget.y - origin.y;
+  const targetDistance = Math.hypot(dx, dy);
+  const directStep =
+    targetDistance > 0
+      ? {
+          x: clamp(origin.x + (dx / targetDistance) * Math.min(speed, targetDistance), 34, worldWidth - 34),
+          y: clamp(origin.y + (dy / targetDistance) * Math.min(speed, targetDistance), 88, worldHeight - 34),
+        }
+      : origin;
+
+  if (targetDistance > 0 && !collidesCharacterWithBounds(directStep, obstacleBounds)) return directStep;
+
+  const pathPosition = getPathChasePosition(origin, desiredTarget, 1000, obstacleBounds, speed);
+  const pathProgress = Math.hypot(pathPosition.x - origin.x, pathPosition.y - origin.y);
+
+  if (pathProgress > 2 && !collidesCharacterWithBounds(pathPosition, obstacleBounds)) return pathPosition;
+
+  return getOpenStepPosition(origin, desiredTarget, speed, obstacleBounds, seed);
+}
+
+function getDirectionalSegmentTarget(origin: Position, angle: number, distance = botMovementSegmentDistance) {
+  return {
+    x: clamp(origin.x + Math.cos(angle) * distance, 70, worldWidth - 70),
+    y: clamp(origin.y + Math.sin(angle) * distance, 118, worldHeight - 70),
+  };
+}
+
+function getSideEscapeAngle(position: Position) {
+  const nearLeft = position.x < 115;
+  const nearRight = position.x > worldWidth - 115;
+  const nearTop = position.y < 145;
+  const nearBottom = position.y > worldHeight - 105;
+
+  if (!(nearLeft || nearRight || nearTop || nearBottom)) return undefined;
+
+  let escapeX = 0;
+  let escapeY = 0;
+  if (nearLeft) escapeX += 1;
+  if (nearRight) escapeX -= 1;
+  if (nearTop) escapeY += 1;
+  if (nearBottom) escapeY -= 1;
+
+  return Math.atan2(escapeY, escapeX);
+}
+
+function normalizeAngle(angle: number) {
+  return Math.atan2(Math.sin(angle), Math.cos(angle));
+}
+
+function avoidReverseAngle(nextAngle: number, previousAngle: number | undefined, seed: string) {
+  if (previousAngle === undefined) return nextAngle;
+
+  const angleDelta = Math.abs(normalizeAngle(nextAngle - previousAngle));
+  if (angleDelta < (Math.PI * 3) / 4) return nextAngle;
+
+  const side = hashText(seed) % 2 === 0 ? 1 : -1;
+  return previousAngle + side * (Math.PI / 2);
+}
+
+function clearBotFleeStarts(fleeStarts: Map<string, Position>, botId: string) {
+  [...fleeStarts.keys()].forEach((key) => {
+    if (key.startsWith(`${botId}:`)) fleeStarts.delete(key);
+  });
 }
 
 function doomsdayStrikeHitsBounds(strike: DoomsdayStrike, bounds: Bounds) {
@@ -549,6 +682,8 @@ function getLobbySnapshot(roundNumber: number, now: number, lobbyStartedAt = now
     serverAnnouncement: '',
     arenaElapsed: 0,
     roundNumber,
+    eventSlot: 0,
+    currentEventStartedAt: 0,
     targetedEffects: {
       sword: [],
       rapid: [],
@@ -562,26 +697,32 @@ function getLobbySnapshot(roundNumber: number, now: number, lobbyStartedAt = now
     fireHazards: [],
     doomsdayStrikes: [],
     zombies: [],
-    battleNpcs: [],
   };
 }
 
-function getRoundSnapshot(serverId: string, roomStartedAt: number, now: number, players: PlayerSnapshot[]): RoundSnapshot {
+function getRoundSnapshot(
+  serverId: string,
+  roomStartedAt: number,
+  now: number,
+  players: PlayerSnapshot[],
+  playerPositionHistory: Array<{ position: Position; recordedAt: number }>,
+  suppressDangerEvents: boolean,
+): RoundSnapshot {
   const elapsedSeconds = Math.max(0, Math.floor((now - roomStartedAt) / 1000));
-  const totalSeconds = elapsedSeconds;
-  const roundNumber = Math.floor(totalSeconds / roundDuration);
-  const roundSecond = totalSeconds % roundDuration;
-  const clientIds = players.map((player) => player.clientId).sort();
+  const roundNumber = 0;
+  const clientIds = players.filter((player) => !player.isDead).map((player) => player.clientId).sort();
 
-  if (roundSecond < lobbyDuration) {
+  if (elapsedSeconds < lobbyDuration) {
     return {
       phase: 'lobby',
-      timeLeft: lobbyDuration - roundSecond,
-      roundEndsAt: now + (lobbyDuration - roundSecond) * 1000,
+      timeLeft: lobbyDuration - elapsedSeconds,
+      roundEndsAt: now + (lobbyDuration - elapsedSeconds) * 1000,
       hiddenArenaObjects: [],
       serverAnnouncement: '',
       arenaElapsed: 0,
       roundNumber,
+      eventSlot: 0,
+      currentEventStartedAt: 0,
       targetedEffects: {
         sword: [],
         rapid: [],
@@ -595,12 +736,10 @@ function getRoundSnapshot(serverId: string, roomStartedAt: number, now: number, 
       fireHazards: [],
       doomsdayStrikes: [],
       zombies: [],
-      battleNpcs: [],
     };
   }
 
-  const arenaElapsed = roundSecond - lobbyDuration;
-  const eventSlot = Math.floor(arenaElapsed / eventInterval);
+  const arenaElapsed = elapsedSeconds - lobbyDuration;
   const hiddenArenaObjects: string[] = [];
   const targetedEffects = {
     sword: [] as string[],
@@ -615,13 +754,19 @@ function getRoundSnapshot(serverId: string, roomStartedAt: number, now: number, 
   const fireHazards: FireHazard[] = [];
   const doomsdayStrikes: DoomsdayStrike[] = [];
   const zombies: Zombie[] = [];
-  const battleNpcs: BattleNpc[] = [];
-  let serverAnnouncement = eventSlot > 0 ? 'Arena events starting...' : '';
-  let doomsdayUsed = false;
+  let serverAnnouncement = arenaElapsed >= eventInterval ? 'Arena events starting...' : '';
+  let eventSlot = 0;
+  let nextEventSecond = eventInterval;
+  let currentEventStartedAt = 0;
+  let previousEvent: ServerEvent | '' = '';
 
-  for (let slot = 1; slot <= eventSlot; slot += 1) {
-    const event = getDeterministicEvent(serverId, roundNumber, slot, doomsdayUsed ? ['SURVIVE THE DOOMSDAY'] : []);
+  while (nextEventSecond <= arenaElapsed && eventSlot < eventTimelineLimit) {
+    eventSlot += 1;
+    const slot = eventSlot;
+    const eventStartedAt = roomStartedAt + (lobbyDuration + nextEventSecond) * 1000;
+    const event = getDeterministicEvent(serverId, roundNumber, slot, previousEvent === 'SURVIVE THE DOOMSDAY' ? ['SURVIVE THE DOOMSDAY'] : []);
     serverAnnouncement = event;
+    currentEventStartedAt = eventStartedAt;
 
     if (event === 'Something will explode') {
       const explodedObject = getDeterministicExplosiveObject(serverId, roundNumber, slot, hiddenArenaObjects);
@@ -635,32 +780,28 @@ function getRoundSnapshot(serverId: string, roomStartedAt: number, now: number, 
           id: `${roundNumber}-${slot}-${explodedObject}`,
           objectId: explodedObject,
           bounds,
-          startedAt: roomStartedAt + (lobbyDuration + slot * eventInterval) * 1000,
+          startedAt: eventStartedAt,
         });
       } else {
         fireHazards.push({
           id: `${roundNumber}-${slot}-fallback-fire`,
           objectId: '',
           bounds: fallbackBounds,
-          startedAt: roomStartedAt + (lobbyDuration + slot * eventInterval) * 1000,
+          startedAt: eventStartedAt,
         });
       }
     }
 
-    if (event === 'SURVIVE THE DOOMSDAY') {
-      doomsdayUsed = true;
-      const eventStartedAt = roomStartedAt + (lobbyDuration + slot * eventInterval) * 1000;
-      const strikesPerEvent = Math.floor(eventInterval * 1000 / doomsdayInterval);
-      const targetedDoomsdayObjects: string[] = [];
+    if (event === 'SURVIVE THE DOOMSDAY' && !suppressDangerEvents) {
+      const strikesPerEvent = Math.floor(postDoomsdayEventDelay * 1000 / doomsdayInterval);
+      const realPlayer = players.find((player) => !isBotClientId(player.clientId));
+      const fallbackTarget = realPlayer?.position ?? { x: worldWidth / 2, y: worldHeight / 2 };
 
       for (let strikeIndex = 0; strikeIndex < strikesPerEvent; strikeIndex += 1) {
         const strikeStartedAt = eventStartedAt + strikeIndex * doomsdayInterval;
-        const usedObjects = [...hiddenArenaObjects, ...targetedDoomsdayObjects];
-        const targetObject = getDeterministicDoomsdayTarget(serverId, roundNumber, slot, strikeIndex, usedObjects);
-        if (targetObject) targetedDoomsdayObjects.push(targetObject);
-
-        const strike = getDeterministicDoomsdayStrike(serverId, roundNumber, slot, strikeIndex, strikeStartedAt, usedObjects);
-        const isVisible = slot === eventSlot && now >= strike.startedAt && now < strike.hitAt + doomsdayPostHitDuration;
+        const strikeTarget = getPositionAt(playerPositionHistory, strikeStartedAt - 2000, fallbackTarget);
+        const strike = getDeterministicDoomsdayStrike(roundNumber, slot, strikeIndex, strikeStartedAt, strikeTarget);
+        const isVisible = now >= strike.startedAt && now < strike.hitAt + doomsdayPostHitDuration;
         const hasHit = now >= strike.hitAt;
 
         if (isVisible) doomsdayStrikes.push(strike);
@@ -683,106 +824,84 @@ function getRoundSnapshot(serverId: string, roomStartedAt: number, now: number, 
       }
     }
 
-    if (event === 'Zombie apocalypse') {
-      const eventStartedAt = roomStartedAt + (lobbyDuration + slot * eventInterval) * 1000;
-
+    if (event === 'Zombie apocalypse' && !suppressDangerEvents) {
       if (now >= eventStartedAt) {
         const activeObstacleBounds = getActiveObjectBounds(hiddenArenaObjects);
 
         clientIds.forEach((targetClientId) => {
-          const targetPlayer = getPlayerByClientId(players, targetClientId);
-          const targetPosition = targetPlayer?.phase === 'arena' && !targetPlayer.isDead ? targetPlayer.position : getSpawnSlot('arena', targetClientId, clientIds);
           const spawn = getDeterministicZombieSpawn(serverId, roundNumber, slot, targetClientId, clientIds);
+          const targetPlayer = getNearestAliveStickman(spawn, players);
+          const targetPosition = targetPlayer?.position ?? getSpawnSlot('arena', targetClientId, clientIds);
           const zombiePosition = getZombiePosition(spawn, targetPosition, now - eventStartedAt, activeObstacleBounds);
 
           zombies.push({
             id: `${roundNumber}-${slot}-${targetClientId}`,
             spawnedAt: eventStartedAt,
             position: zombiePosition,
-            targetClientId,
-          });
-        });
-      }
-    }
-
-    if (event === 'You must battle to death') {
-      const eventStartedAt = roomStartedAt + (lobbyDuration + slot * eventInterval) * 1000;
-
-      if (now >= eventStartedAt) {
-        const activeObstacleBounds = getActiveObjectBounds(hiddenArenaObjects);
-
-        clientIds.forEach((targetClientId) => {
-          const targetPlayer = getPlayerByClientId(players, targetClientId);
-          const targetPosition = targetPlayer?.phase === 'arena' && !targetPlayer.isDead ? targetPlayer.position : getSpawnSlot('arena', targetClientId, clientIds);
-          const spawn = getDeterministicBattleNpcSpawn(serverId, roundNumber, slot, targetClientId, clientIds);
-          const npcPosition = getPathChasePosition(spawn, targetPosition, now - eventStartedAt, activeObstacleBounds, battleNpcSpeed);
-
-          battleNpcs.push({
-            id: `${roundNumber}-${slot}-${targetClientId}`,
-            spawnedAt: eventStartedAt,
-            position: npcPosition,
-            targetClientId,
-            direction: getDirectionToward(npcPosition, targetPosition),
-            swordSwinging: Math.floor((now - eventStartedAt) / battleNpcSwingInterval) % 2 === 0,
+            targetClientId: targetPlayer?.clientId ?? targetClientId,
           });
         });
       }
     }
 
     const targetClientId = getDeterministicTarget(clientIds, serverId, roundNumber, slot);
+    const playerEventActive = now < eventStartedAt + playerEventEffectDuration;
 
-    if (event === 'You will get a sword' && targetClientId) {
+    if (playerEventActive && event === 'Someone will get a sword' && targetClientId) {
       targetedEffects.sword.push(targetClientId);
     }
 
-    if (event === 'You will find out you are rapid' && targetClientId) {
+    if (playerEventActive && event === 'Someone will find out they are rapid' && targetClientId) {
       targetedEffects.rapid.push(targetClientId);
     }
 
-    if (event === 'You will get your leg lost' && targetClientId) {
+    if (playerEventActive && event === 'Someone will get their leg lost' && targetClientId) {
       targetedEffects.missingRightLeg.push(targetClientId);
     }
 
-    if (event === 'You will turn blue' && targetClientId) {
+    if (playerEventActive && event === 'Someone will turn blue' && targetClientId) {
       targetedEffects.red = targetedEffects.red.filter((clientId) => clientId !== targetClientId);
       targetedEffects.green = targetedEffects.green.filter((clientId) => clientId !== targetClientId);
       targetedEffects.blue.push(targetClientId);
     }
 
-    if (event === 'You will turn red' && targetClientId) {
+    if (playerEventActive && event === 'Someone will turn red' && targetClientId) {
       targetedEffects.blue = targetedEffects.blue.filter((clientId) => clientId !== targetClientId);
       targetedEffects.green = targetedEffects.green.filter((clientId) => clientId !== targetClientId);
       targetedEffects.red.push(targetClientId);
     }
 
-    if (event === 'You will turn green' && targetClientId) {
+    if (playerEventActive && event === 'Someone will turn green' && targetClientId) {
       targetedEffects.blue = targetedEffects.blue.filter((clientId) => clientId !== targetClientId);
       targetedEffects.red = targetedEffects.red.filter((clientId) => clientId !== targetClientId);
       targetedEffects.green.push(targetClientId);
     }
 
     if (event === 'FREEZE' && targetClientId) {
-      const eventStartedAt = roomStartedAt + (lobbyDuration + slot * eventInterval) * 1000;
-      if (now >= eventStartedAt + freezeDuration) continue;
-
-      targetedEffects.frozen.push(targetClientId);
-      targetedEffects.frozenIds.push(`${roundNumber}-${slot}-${targetClientId}`);
+      if (now < eventStartedAt + freezeDuration) {
+        targetedEffects.frozen.push(targetClientId);
+        targetedEffects.frozenIds.push(`${roundNumber}-${slot}-${targetClientId}`);
+      }
     }
+
+    previousEvent = event;
+    nextEventSecond += event === 'SURVIVE THE DOOMSDAY' ? postDoomsdayEventDelay : eventInterval;
   }
 
   return {
     phase: 'arena',
-    timeLeft: arenaDuration - arenaElapsed,
-    roundEndsAt: now + (arenaDuration - arenaElapsed) * 1000,
+    timeLeft: arenaElapsed,
+    roundEndsAt: Number.POSITIVE_INFINITY,
     hiddenArenaObjects,
     serverAnnouncement,
     arenaElapsed,
     roundNumber,
+    eventSlot,
+    currentEventStartedAt,
     targetedEffects,
     fireHazards: fireHazards.filter((hazard) => now - hazard.startedAt < fireDuration),
     doomsdayStrikes,
     zombies,
-    battleNpcs,
   };
 }
 
@@ -793,7 +912,7 @@ function getSpawnSlot(nextPhase: GamePhase, clientId: string, clientIds: string[
   return spawnSlots[slotIndex];
 }
 
-function PlayerAvatar({ player, position, isLocal }: { player: PlayerSnapshot; position: Position; isLocal?: boolean }) {
+function PlayerAvatar({ player, position, isLocal, positionUnit = 'px' }: { player: PlayerSnapshot; position: Position; isLocal?: boolean; positionUnit?: 'px' | '%' }) {
   if (player.phase === 'arena' && player.isDead) return null;
 
   return (
@@ -803,12 +922,12 @@ function PlayerAvatar({ player, position, isLocal }: { player: PlayerSnapshot; p
       } ${player.isRed ? 'red-player' : ''} ${player.isGreen ? 'green-player' : ''} ${
         player.isFrozen ? 'frozen-player' : ''
       } ${player.missingRightLeg ? 'missing-right-leg' : ''}`}
-      style={{ left: `${position.x}px`, top: `${position.y}px` }}
+      style={{ left: `${position.x}${positionUnit}`, top: `${position.y}${positionUnit}` }}
     >
       <div className="nameplate">{player.nickname}</div>
       {player.phase === 'arena' && (
         <div className="health-bar" aria-label="Health">
-          <span style={{ width: `${player.health}%` }} />
+          <span style={{ width: `${Math.min(100, player.health)}%` }} />
         </div>
       )}
       <div className="stickman">
@@ -835,9 +954,47 @@ function PlayerAvatar({ player, position, isLocal }: { player: PlayerSnapshot; p
   );
 }
 
-function ZombieAvatar({ position }: { position: Position }) {
+function createBots(nextBotIds: string[], now: number): BotSnapshot[] {
+  return nextBotIds.map((botId, index) => ({
+    kind: 'bot',
+    clientId: botId,
+    userId: botId,
+    nickname: botNames[botId] ?? `Bot ${botId.replace('bot-', '')}`,
+    joinedAt: now,
+    position: botSpawnSlots[botId] ?? arenaSpawnSlots[index + 1] ?? arenaSpawnSlots[0],
+    direction: 'front',
+    phase: 'arena',
+    hasSword: false,
+    isBlue: false,
+    isRed: false,
+    isGreen: false,
+    isFrozen: false,
+    isRapid: false,
+    missingRightLeg: false,
+    swordSwinging: false,
+    health: botMaxHealth,
+    isDead: false,
+    updatedAt: now,
+  }));
+}
+
+function createInitialBots(now: number): BotSnapshot[] {
+  return createBots(initialBotIds, now);
+}
+
+function ZombieAvatar({ zombie, position }: { zombie?: Zombie; position: Position }) {
+  const isKing = zombie?.kind === 'king';
+  const health = zombie?.health ?? zombie?.maxHealth;
+  const maxHealth = zombie?.maxHealth ?? health;
+
   return (
-    <div className="zombie" style={{ left: `${position.x}px`, top: `${position.y}px` }}>
+    <div className={`zombie ${isKing ? 'zombie-king' : ''} ${zombie?.direction ?? 'front'}`} style={{ left: `${position.x}px`, top: `${position.y}px` }}>
+      {isKing && <div className="zombie-crown">KING</div>}
+      {health !== undefined && maxHealth !== undefined && (
+        <div className="zombie-health" aria-label="Zombie health">
+          <span style={{ width: `${Math.max(0, Math.min(100, (health / maxHealth) * 100))}%` }} />
+        </div>
+      )}
       <div className="zombie-stickman">
         <span className="head" />
         <span className="torso" />
@@ -845,39 +1002,23 @@ function ZombieAvatar({ position }: { position: Position }) {
         <span className="arm right-arm" />
         <span className="leg left-leg" />
         <span className="leg right-leg" />
+        {isKing && (
+          <span className={`zombie-sword ${zombie?.swordSwinging ? 'swing' : ''}`}>
+            <span />
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-function BattleNpcAvatar({ npc, position, health }: { npc: BattleNpc; position: Position; health: number }) {
-  return (
-    <div className={`player battle-npc ${npc.direction}`} style={{ left: `${position.x}px`, top: `${position.y}px` }}>
-      <div className="nameplate">Brawler</div>
-      <div className="health-bar" aria-label="NPC health">
-        <span style={{ width: `${(health / battleNpcMaxHealth) * 100}%` }} />
-      </div>
-      <div className="stickman">
-        <span className="head" />
-        <span className="torso" />
-        <span className="arm left-arm" />
-        <span className="arm right-arm" />
-        <span className="leg left-leg" />
-        <span className="leg right-leg" />
-        <button type="button" className={`classic-sword ${npc.swordSwinging ? 'swing' : ''}`} aria-label="NPC sword" tabIndex={-1}>
-          <span className="sword-blade" />
-          <span className="sword-guard" />
-          <span className="sword-handle" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-export function Lobby({ nickname, userId }: LobbyProps) {
+export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
   const clientId = useMemo(() => getClientId(userId), [userId]);
   const joinedAtRef = useRef(Date.now());
   const [phase, setPhase] = useState<GamePhase>('lobby');
+  const [menuOpen, setMenuOpen] = useState(true);
+  const [menuPanel, setMenuPanel] = useState<MenuPanel>('main');
+  const [isPaused, setIsPaused] = useState(false);
   const [timeLeft, setTimeLeft] = useState(lobbyDuration);
   const [roundEndsAt, setRoundEndsAt] = useState(() => Date.now() + lobbyDuration * 1000);
   const [position, setPosition] = useState<Position>(lobbySpawnSlots[0]);
@@ -897,8 +1038,13 @@ export function Lobby({ nickname, userId }: LobbyProps) {
   const [fireHazards, setFireHazards] = useState<FireHazard[]>([]);
   const [doomsdayStrikes, setDoomsdayStrikes] = useState<DoomsdayStrike[]>([]);
   const [zombies, setZombies] = useState<Zombie[]>([]);
-  const [battleNpcs, setBattleNpcs] = useState<BattleNpc[]>([]);
-  const [battleNpcHealth, setBattleNpcHealth] = useState<Record<string, number>>({});
+  const [zombieKing, setZombieKing] = useState<Zombie | null>(null);
+  const [kingZombies, setKingZombies] = useState<Zombie[]>([]);
+  const [equippedItem, setEquippedItem] = useState<'sword' | 'gun'>('sword');
+  const [bots, setBots] = useState<BotSnapshot[]>(() => createInitialBots(Date.now()));
+  const [arenaMode, setArenaMode] = useState<ArenaMode>('main');
+  const [duelState, setDuelState] = useState<DuelState | null>(null);
+  const [deathMessage, setDeathMessage] = useState('');
   const [health, setHealth] = useState(100);
   const [isDead, setIsDead] = useState(false);
   const [roomStartedAt, setRoomStartedAt] = useState(joinedAtRef.current);
@@ -906,23 +1052,40 @@ export function Lobby({ nickname, userId }: LobbyProps) {
   const [spawnPlaced, setSpawnPlaced] = useState(false);
   const pressedKeys = useRef(new Set<string>());
   const frameRef = useRef<HTMLDivElement | null>(null);
+  const lobbyMusicRef = useRef<HTMLAudioElement | null>(null);
+  const arenaMusicRef = useRef<HTMLAudioElement | null>(null);
+  const lobbyMusicEnabledRef = useRef(false);
   const swordTimerRef = useRef<number | null>(null);
   const swordSwingStartedAtRef = useRef(0);
   const playerSnapshotRef = useRef<PlayerSnapshot | null>(null);
+  const positionRef = useRef(position);
+  const botsRef = useRef(bots);
+  const isDeadRef = useRef(isDead);
   const damagedFireIdsRef = useRef(new Set<string>());
   const damagedDoomsdayIdsRef = useRef(new Set<string>());
   const killedZombieIdsRef = useRef(new Set<string>());
   const damagedZombieIdsRef = useRef(new Set<string>());
   const zombiePositionCacheRef = useRef(new Map<string, Position>());
   const zombiePositionUpdatedAtRef = useRef(Date.now());
-  const battleNpcPositionCacheRef = useRef(new Map<string, Position>());
-  const battleNpcPositionUpdatedAtRef = useRef(Date.now());
-  const damagedBattleNpcSwingIdsRef = useRef(new Set<string>());
-  const damagedBattleNpcFireIdsRef = useRef(new Set<string>());
-  const damagedBattleNpcDoomsdayIdsRef = useRef(new Set<string>());
-  const battleNpcHitAtRef = useRef(new Map<string, number>());
-  const frozenUntilRef = useRef(0);
-  const handledFreezeIdsRef = useRef(new Set<string>());
+  const zombieKingRef = useRef<Zombie | null>(null);
+  const kingZombiesRef = useRef<Zombie[]>([]);
+  const nextZombieKingSpawnAtRef = useRef(0);
+  const playerPositionHistoryRef = useRef<Array<{ position: Position; recordedAt: number }>>([]);
+  const handledEventIdsRef = useRef(new Set<string>());
+  const damagedBotSwingIdsRef = useRef(new Set<string>());
+  const damagedBotFireIdsRef = useRef(new Set<string>());
+  const damagedBotDoomsdayIdsRef = useRef(new Set<string>());
+  const botFleeStartsRef = useRef(new Map<string, Position>());
+  const botWanderTargetsRef = useRef(new Map<string, Position>());
+  const botLastAnglesRef = useRef(new Map<string, number>());
+  const botStuckRef = useRef(new Map<string, { position: Position; ticks: number }>());
+  const botDeadAtRef = useRef(new Map<string, number>());
+  const botEventImmuneUntilRef = useRef(new Map<string, number>());
+  const stickmanHitAtRef = useRef(new Map<string, number>());
+  const destroyedArenaObjectsRef = useRef(new Set<string>());
+  const pauseStartedAtRef = useRef(0);
+  const invulnerableUntilRef = useRef(0);
+  const deathReturnAtRef = useRef(0);
   const gameStateRef = useRef<GameStateSnapshot>({
     phase: 'lobby',
     roundEndsAt: Date.now() + lobbyDuration * 1000,
@@ -930,7 +1093,9 @@ export function Lobby({ nickname, userId }: LobbyProps) {
     serverAnnouncement: '',
   });
   const movementStep = isRapid && phase === 'arena' ? rapidStep : baseStep;
-  const canMove = !isDead && !isFrozen;
+  const playerInActiveDuel = Boolean(duelState?.fighters.includes(clientId));
+  const gameStopped = menuOpen || isPaused;
+  const canMove = !gameStopped && !isDead && !isFrozen && (phase === 'lobby' || arenaMode === 'main' || playerInActiveDuel);
 
   const displayName = useMemo(() => {
     const trimmed = nickname.trim();
@@ -974,38 +1139,47 @@ export function Lobby({ nickname, userId }: LobbyProps) {
       userId,
     ],
   );
-  const roomPlayerIds = useMemo(() => [clientId], [clientId]);
+  const roomPlayerIds = useMemo(() => [clientId, ...botIds], [clientId]);
   const roomPlayerIdsRef = useRef(roomPlayerIds);
-  const visibleBattleNpcs = useMemo(
-    () => battleNpcs.filter((npc) => (battleNpcHealth[npc.id] ?? battleNpcMaxHealth) > 0),
-    [battleNpcHealth, battleNpcs],
-  );
 
   useEffect(() => {
     playerSnapshotRef.current = playerSnapshot;
   }, [playerSnapshot]);
 
   useEffect(() => {
+    positionRef.current = position;
+  }, [position]);
+
+  useEffect(() => {
+    botsRef.current = bots;
+  }, [bots]);
+
+  useEffect(() => {
+    zombieKingRef.current = zombieKing;
+  }, [zombieKing]);
+
+  useEffect(() => {
+    kingZombiesRef.current = kingZombies;
+  }, [kingZombies]);
+
+  useEffect(() => {
+    if (!isZombieKingAlive(zombieKing) && kingZombies.length > 0) {
+      clearKingZombies();
+      nextZombieKingSpawnAtRef.current = 0;
+    }
+  }, [kingZombies, zombieKing]);
+
+  useEffect(() => {
+    isDeadRef.current = isDead;
+  }, [isDead]);
+
+  useEffect(() => {
     roomPlayerIdsRef.current = roomPlayerIds;
   }, [roomPlayerIds]);
 
   useEffect(() => {
-    if (phase !== 'arena') return;
-
-    setBattleNpcHealth((current) => {
-      let changed = false;
-      const next = { ...current };
-
-      battleNpcs.forEach((npc) => {
-        if (next[npc.id] === undefined) {
-          next[npc.id] = battleNpcMaxHealth;
-          changed = true;
-        }
-      });
-
-      return changed ? next : current;
-    });
-  }, [battleNpcs, phase]);
+    onMenuOpenChange?.(menuOpen);
+  }, [menuOpen, onMenuOpenChange]);
 
   useEffect(() => {
     if (spawnPlaced) return;
@@ -1025,11 +1199,21 @@ export function Lobby({ nickname, userId }: LobbyProps) {
   function applyRoundSnapshot(nextSnapshot: RoundSnapshot) {
     const phaseChanged = gameStateRef.current.phase !== nextSnapshot.phase;
     const enteringLobby = phaseChanged && nextSnapshot.phase === 'lobby';
+    const mergedHiddenArenaObjects =
+      nextSnapshot.phase === 'arena'
+        ? Array.from(new Set([...destroyedArenaObjectsRef.current, ...nextSnapshot.hiddenArenaObjects]))
+        : [];
+
+    if (nextSnapshot.phase === 'arena') {
+      destroyedArenaObjectsRef.current = new Set(mergedHiddenArenaObjects);
+    } else {
+      destroyedArenaObjectsRef.current.clear();
+    }
 
     gameStateRef.current = {
       phase: nextSnapshot.phase,
       roundEndsAt: nextSnapshot.roundEndsAt,
-      hiddenArenaObjects: nextSnapshot.hiddenArenaObjects,
+      hiddenArenaObjects: mergedHiddenArenaObjects,
       serverAnnouncement: nextSnapshot.serverAnnouncement,
     };
 
@@ -1047,47 +1231,81 @@ export function Lobby({ nickname, userId }: LobbyProps) {
       setIsRed(false);
       setIsGreen(false);
       setIsFrozen(false);
+      setDeathMessage('');
+      setIsPaused(false);
+      setZombieKing(null);
+      setKingZombies([]);
+      setEquippedItem('sword');
+      pauseStartedAtRef.current = 0;
+      deathReturnAtRef.current = 0;
+      nextZombieKingSpawnAtRef.current = 0;
+      setArenaMode('main');
+      setDuelState(null);
+      setBots(nextSnapshot.phase === 'arena' ? createInitialBots(Date.now()) : []);
       damagedFireIdsRef.current.clear();
       damagedDoomsdayIdsRef.current.clear();
       killedZombieIdsRef.current.clear();
       damagedZombieIdsRef.current.clear();
-      handledFreezeIdsRef.current.clear();
-      damagedBattleNpcSwingIdsRef.current.clear();
-      damagedBattleNpcFireIdsRef.current.clear();
-      damagedBattleNpcDoomsdayIdsRef.current.clear();
-      battleNpcHitAtRef.current.clear();
-      battleNpcPositionCacheRef.current.clear();
-      setBattleNpcHealth({});
+      handledEventIdsRef.current.clear();
+      damagedBotSwingIdsRef.current.clear();
+      damagedBotFireIdsRef.current.clear();
+      damagedBotDoomsdayIdsRef.current.clear();
+      botFleeStartsRef.current.clear();
+      botWanderTargetsRef.current.clear();
+      botLastAnglesRef.current.clear();
+      botStuckRef.current.clear();
+      botDeadAtRef.current.clear();
+      botEventImmuneUntilRef.current.clear();
+      destroyedArenaObjectsRef.current.clear();
+      kingZombiesRef.current = [];
+      zombieKingRef.current = null;
+      stickmanHitAtRef.current.clear();
+      invulnerableUntilRef.current = 0;
     }
 
     setPhase(nextSnapshot.phase);
     setTimeLeft(nextSnapshot.timeLeft);
     setRoundEndsAt(nextSnapshot.roundEndsAt);
-    setHiddenArenaObjects(nextSnapshot.hiddenArenaObjects);
+    setHiddenArenaObjects(mergedHiddenArenaObjects);
     setFireHazards(nextSnapshot.fireHazards);
     setDoomsdayStrikes(nextSnapshot.doomsdayStrikes);
-    setZombies(getSmoothedZombies(nextSnapshot.zombies, nextSnapshot.hiddenArenaObjects, nextSnapshot.phase));
-    setBattleNpcs(getSmoothedBattleNpcs(nextSnapshot.battleNpcs, nextSnapshot.hiddenArenaObjects, nextSnapshot.phase));
+    setZombies(getSmoothedZombies(nextSnapshot.zombies, mergedHiddenArenaObjects, nextSnapshot.phase));
     setServerAnnouncement(nextSnapshot.serverAnnouncement);
-    setHasSword(!enteringLobby && !isDead && nextSnapshot.targetedEffects.sword.includes(clientId));
+    const playerIsDuelFighter = Boolean(duelState?.fighters.includes(clientId));
+    setHasSword((current) => !enteringLobby && !isDead && (current || nextSnapshot.targetedEffects.sword.includes(clientId) || playerIsDuelFighter));
     setIsRapid(!enteringLobby && !isDead && nextSnapshot.targetedEffects.rapid.includes(clientId));
     setMissingRightLeg(!enteringLobby && !isDead && nextSnapshot.targetedEffects.missingRightLeg.includes(clientId));
     setIsBlue(!enteringLobby && !isDead && nextSnapshot.targetedEffects.blue.includes(clientId));
     setIsRed(!enteringLobby && !isDead && nextSnapshot.targetedEffects.red.includes(clientId));
     setIsGreen(!enteringLobby && !isDead && nextSnapshot.targetedEffects.green.includes(clientId));
-    if (enteringLobby || isDead) {
-      frozenUntilRef.current = 0;
-      setIsFrozen(false);
-    } else if (nextSnapshot.targetedEffects.frozen.includes(clientId)) {
-      const newFreezeId = nextSnapshot.targetedEffects.frozenIds.find((freezeId) => !handledFreezeIdsRef.current.has(freezeId));
+    setIsFrozen(!enteringLobby && !isDead && nextSnapshot.targetedEffects.frozen.includes(clientId));
 
-      if (newFreezeId) {
-        handledFreezeIdsRef.current.add(newFreezeId);
-        frozenUntilRef.current = Date.now() + freezeDuration;
-      }
-      setIsFrozen(Date.now() < frozenUntilRef.current);
-    } else {
-      setIsFrozen(Date.now() < frozenUntilRef.current);
+    setBots((currentBots) =>
+      currentBots.map((bot) => {
+        const now = Date.now();
+        const isDuelFighter = Boolean(duelState?.fighters.includes(bot.clientId));
+        const eventImmune = now < (botEventImmuneUntilRef.current.get(bot.clientId) ?? 0);
+        const canReceiveEvent = !bot.isDead && !eventImmune;
+        const receivesBlue = canReceiveEvent && nextSnapshot.targetedEffects.blue.includes(bot.clientId);
+        const receivesRed = canReceiveEvent && nextSnapshot.targetedEffects.red.includes(bot.clientId);
+        const receivesGreen = canReceiveEvent && nextSnapshot.targetedEffects.green.includes(bot.clientId);
+
+        return {
+          ...bot,
+          phase: nextSnapshot.phase,
+          hasSword: !bot.isDead && (bot.hasSword || isDuelFighter || (canReceiveEvent && nextSnapshot.targetedEffects.sword.includes(bot.clientId))),
+          isRapid: canReceiveEvent && nextSnapshot.targetedEffects.rapid.includes(bot.clientId),
+          isBlue: !bot.isDead && (receivesBlue || (bot.isBlue && !receivesRed && !receivesGreen)),
+          isRed: !bot.isDead && (receivesRed || (bot.isRed && !receivesBlue && !receivesGreen)),
+          isGreen: !bot.isDead && (receivesGreen || (bot.isGreen && !receivesBlue && !receivesRed)),
+          isFrozen: canReceiveEvent && nextSnapshot.targetedEffects.frozen.includes(bot.clientId),
+          missingRightLeg: canReceiveEvent && nextSnapshot.targetedEffects.missingRightLeg.includes(bot.clientId),
+        };
+      }),
+    );
+
+    if (nextSnapshot.phase === 'arena' && nextSnapshot.serverAnnouncement === 'BATTLE TO DEATH') {
+      startBattleToDeath(nextSnapshot);
     }
   }
 
@@ -1098,6 +1316,8 @@ export function Lobby({ nickname, userId }: LobbyProps) {
       const nextHealth = Math.max(0, current - amount);
       if (nextHealth <= 0) {
         setIsDead(true);
+        setDeathMessage(hashText(`${clientId}:${Date.now()}:death`) % 2 === 0 ? 'You died hahaha' : 'You died LOL');
+        deathReturnAtRef.current = Date.now() + deathReturnDelay;
         setSwordSwinging(false);
         pressedKeys.current.clear();
       }
@@ -1105,16 +1325,183 @@ export function Lobby({ nickname, userId }: LobbyProps) {
     });
   }
 
-  function damageBattleNpc(npcId: string, amount: number) {
-    setBattleNpcHealth((current) => ({
-      ...current,
-      [npcId]: Math.max(0, (current[npcId] ?? battleNpcMaxHealth) - amount),
-    }));
+  function damageBot(botId: string, amount: number) {
+    setBots((currentBots) =>
+      currentBots.map((bot) => {
+        if (bot.clientId !== botId || bot.isDead) return bot;
+        const nextHealth = Math.max(0, bot.health - amount);
+        const nextIsDead = nextHealth <= 0;
+        if (nextIsDead && !botDeadAtRef.current.has(bot.clientId)) {
+          botDeadAtRef.current.set(bot.clientId, Date.now());
+          botEventImmuneUntilRef.current.delete(bot.clientId);
+          botFleeStartsRef.current.delete(bot.clientId);
+          botWanderTargetsRef.current.delete(bot.clientId);
+          botLastAnglesRef.current.delete(bot.clientId);
+          botStuckRef.current.delete(bot.clientId);
+          spawnZombieKing();
+        }
+
+        return {
+          ...bot,
+          health: nextHealth,
+          isDead: nextIsDead,
+          hasSword: nextIsDead ? false : bot.hasSword,
+          isRapid: nextIsDead ? false : bot.isRapid,
+          isBlue: nextIsDead ? false : bot.isBlue,
+          isRed: nextIsDead ? false : bot.isRed,
+          isGreen: nextIsDead ? false : bot.isGreen,
+          isFrozen: nextIsDead ? false : bot.isFrozen,
+          missingRightLeg: nextIsDead ? false : bot.missingRightLeg,
+          swordSwinging: nextIsDead ? false : bot.swordSwinging,
+        };
+      }),
+    );
+  }
+
+  function damageKingZombie(zombieId: string, amount: number) {
+    setKingZombies((currentZombies) =>
+      currentZombies.map((zombie) => {
+        if (zombie.id !== zombieId || killedZombieIdsRef.current.has(zombie.id)) return zombie;
+        const nextHealth = Math.max(0, (zombie.health ?? zombieMinionMaxHealth) - amount);
+        if (nextHealth <= 0) killedZombieIdsRef.current.add(zombie.id);
+        return { ...zombie, health: nextHealth };
+      }),
+    );
+  }
+
+  function damageZombieKing(amount: number) {
+    setZombieKing((currentKing) => {
+      if (!currentKing || killedZombieIdsRef.current.has(currentKing.id)) return currentKing;
+      const nextHealth = Math.max(0, (currentKing.health ?? zombieKingMaxHealth) - amount);
+      if (nextHealth <= 0) {
+        killedZombieIdsRef.current.add(currentKing.id);
+        clearKingZombies();
+        zombieKingRef.current = null;
+        nextZombieKingSpawnAtRef.current = 0;
+        setEquippedItem('sword');
+        return null;
+      }
+      return { ...currentKing, health: nextHealth, swordSwinging: nextHealth > 0 && currentKing.swordSwinging };
+    });
+  }
+
+  function getStickmanById(stickmanId: string, nextBots = botsRef.current) {
+    if (stickmanId === clientId) return playerSnapshotRef.current;
+    return nextBots.find((bot) => bot.clientId === stickmanId);
+  }
+
+  function getAliveStickmen(nextBots = botsRef.current) {
+    const localSnapshot = playerSnapshotRef.current;
+    return [localSnapshot, ...nextBots].filter((stickman): stickman is PlayerSnapshot | BotSnapshot => {
+      return Boolean(stickman && stickman.phase === 'arena' && !stickman.isDead);
+    });
+  }
+
+  function botCanTakeEventDamage(botId: string, now = Date.now()) {
+    return now >= (botEventImmuneUntilRef.current.get(botId) ?? 0);
+  }
+
+  function isZombieKingAlive(nextKing = zombieKingRef.current) {
+    return Boolean(nextKing && !killedZombieIdsRef.current.has(nextKing.id) && (nextKing.health ?? 0) > 0);
+  }
+
+  function clearKingZombies() {
+    kingZombiesRef.current = [];
+    setKingZombies([]);
+  }
+
+  function spawnZombieKing(now = Date.now()) {
+    if (isZombieKingAlive()) return;
+
+    const king: Zombie = {
+      id: `zombie-king-${now}`,
+      spawnedAt: now,
+      source: 'king',
+      kind: 'king',
+      position: { x: worldWidth / 2, y: worldHeight - 42 },
+      targetClientId: clientId,
+      health: zombieKingMaxHealth,
+      maxHealth: zombieKingMaxHealth,
+      direction: 'back',
+      swordSwinging: false,
+    };
+
+    zombieKingRef.current = king;
+    setZombieKing(king);
+    setEquippedItem('gun');
+    nextZombieKingSpawnAtRef.current = now + zombieKingSpawnInterval;
+  }
+
+  function startBattleToDeath(nextSnapshot: RoundSnapshot) {
+    const eventId = `${nextSnapshot.roundNumber}:${nextSnapshot.eventSlot}:battle`;
+    if (handledEventIdsRef.current.has(eventId) || duelState) return;
+
+    const aliveStickmen = getAliveStickmen();
+    const playerIsAlive = aliveStickmen.some((stickman) => stickman.clientId === clientId);
+    const opponents = aliveStickmen.filter((stickman) => stickman.clientId !== clientId);
+    if (!playerIsAlive || opponents.length === 0) return;
+
+    handledEventIdsRef.current.add(eventId);
+    const opponentIndex = hashText(`${eventId}:opponent`) % opponents.length;
+    const fighters: [string, string] = [clientId, opponents[opponentIndex].clientId];
+    setArenaMode('duel');
+    setDuelState({ id: eventId, fighters, startedAt: Date.now() });
+
+    fighters.forEach((fighterId, index) => {
+      if (fighterId === clientId) {
+        setPosition(duelSpawnSlots[index]);
+        setDirection(index === 0 ? 'right' : 'left');
+        setHasSword(true);
+      }
+    });
+
+    setBots((currentBots) =>
+      currentBots.map((bot) => {
+        const fighterIndex = fighters.indexOf(bot.clientId);
+        if (fighterIndex === -1) return bot;
+
+        return {
+          ...bot,
+          position: duelSpawnSlots[fighterIndex],
+          direction: fighterIndex === 0 ? 'right' : 'left',
+          hasSword: true,
+          swordSwinging: false,
+          isFrozen: false,
+        };
+      }),
+    );
+  }
+
+  function finishDuel(winnerId: string) {
+    setArenaMode('main');
+    setDuelState(null);
+    invulnerableUntilRef.current = Date.now() + duelReturnGraceDuration;
+    damagedFireIdsRef.current.clear();
+    damagedDoomsdayIdsRef.current.clear();
+    damagedZombieIdsRef.current.clear();
+    stickmanHitAtRef.current.clear();
+
+    if (winnerId === clientId) {
+      setPosition(postDuelPlayerSpawn);
+    }
+
+    setBots((currentBots) =>
+      currentBots.map((bot) => {
+        if (bot.clientId !== winnerId) return bot;
+        const currentPlayerIds = [clientId, ...currentBots.map((currentBot) => currentBot.clientId)];
+
+        return {
+          ...bot,
+          position: getSpawnSlot('arena', bot.clientId, currentPlayerIds),
+          swordSwinging: false,
+        };
+      }),
+    );
   }
 
   function getRoomPlayerSnapshots() {
     const localSnapshot = playerSnapshotRef.current;
-    return localSnapshot ? [localSnapshot] : [];
+    return localSnapshot ? [localSnapshot, ...botsRef.current] : botsRef.current;
   }
 
   function getSmoothedZombies(nextZombies: Zombie[], hiddenObjectIds: string[], nextPhase: GamePhase) {
@@ -1152,63 +1539,74 @@ export function Lobby({ nickname, userId }: LobbyProps) {
     }));
   }
 
-  function getSmoothedBattleNpcs(nextNpcs: BattleNpc[], hiddenObjectIds: string[], nextPhase: GamePhase) {
-    if (nextPhase !== 'arena') {
-      battleNpcPositionCacheRef.current.clear();
-      battleNpcPositionUpdatedAtRef.current = Date.now();
-      return nextNpcs;
+  function startFromMenu() {
+    const now = Date.now();
+    pressedKeys.current.clear();
+    setShopOpen(false);
+    setShopDismissed(false);
+    lobbyMusicEnabledRef.current = true;
+    setIsPaused(false);
+    pauseStartedAtRef.current = 0;
+    setMenuOpen(false);
+    setMenuPanel('main');
+    setRoomStartedAt(now);
+    setRoundEndsAt(now + lobbyDuration * 1000);
+    setRoundSeed((current) => current + 1);
+  }
+
+  function shiftPausedDeadlines(pauseDuration: number) {
+    if (deathReturnAtRef.current > 0) deathReturnAtRef.current += pauseDuration;
+    if (invulnerableUntilRef.current > 0) invulnerableUntilRef.current += pauseDuration;
+
+    botDeadAtRef.current.forEach((deadAt, botId) => {
+      botDeadAtRef.current.set(botId, deadAt + pauseDuration);
+    });
+    botEventImmuneUntilRef.current.forEach((immuneUntil, botId) => {
+      botEventImmuneUntilRef.current.set(botId, immuneUntil + pauseDuration);
+    });
+    playerPositionHistoryRef.current = playerPositionHistoryRef.current.map((entry) => ({
+      ...entry,
+      recordedAt: entry.recordedAt + pauseDuration,
+    }));
+  }
+
+  function togglePause() {
+    if (phase !== 'arena') return;
+    pressedKeys.current.clear();
+
+    if (!isPaused) {
+      pauseStartedAtRef.current = Date.now();
+      setIsPaused(true);
+      return;
     }
 
-    const now = Date.now();
-    const elapsedMs = Math.min(350, Math.max(0, now - battleNpcPositionUpdatedAtRef.current));
-    const obstacleBounds = getActiveObjectBounds(hiddenObjectIds);
-    const activeNpcIds = new Set(nextNpcs.map((npc) => npc.id));
-    const nextCache = new Map<string, Position>();
-
-    nextNpcs.forEach((npc) => {
-      const previousPosition = battleNpcPositionCacheRef.current.get(npc.id);
-      const nextPosition = previousPosition
-        ? getPathChasePosition(previousPosition, npc.position, elapsedMs, obstacleBounds, battleNpcSpeed)
-        : npc.position;
-
-      nextCache.set(npc.id, nextPosition);
-    });
-
-    battleNpcPositionCacheRef.current.forEach((_position, npcId) => {
-      if (!activeNpcIds.has(npcId)) battleNpcPositionCacheRef.current.delete(npcId);
-    });
-
-    battleNpcPositionCacheRef.current = nextCache;
-    battleNpcPositionUpdatedAtRef.current = now;
-
-    return nextNpcs.map((npc) => {
-      const nextPosition = nextCache.get(npc.id) ?? npc.position;
-
-      return {
-        ...npc,
-        position: nextPosition,
-        direction: getDirectionToward(nextPosition, position),
-      };
-    });
+    const pauseDuration = Math.max(0, Date.now() - pauseStartedAtRef.current);
+    pauseStartedAtRef.current = 0;
+    shiftPausedDeadlines(pauseDuration);
+    setRoomStartedAt((current) => current + pauseDuration);
+    setIsPaused(false);
   }
 
   useEffect(() => {
+    if (gameStopped) return;
+
     function applyCurrentRoundSnapshot() {
       const now = Date.now();
-      const snapshot = getRoundSnapshot(`local-game-${roundSeed}`, roomStartedAt, now, getRoomPlayerSnapshots());
+      const history = playerPositionHistoryRef.current;
+      history.push({ position: positionRef.current, recordedAt: now });
+      playerPositionHistoryRef.current = history.filter((entry) => now - entry.recordedAt <= 30000);
 
-      if (snapshot.phase === 'lobby') {
-        applyRoundSnapshot(snapshot);
+      if (isDeadRef.current && deathReturnAtRef.current > 0 && now >= deathReturnAtRef.current) {
+        setRoomStartedAt(now);
+        setRoundSeed((current) => current + 1);
+        applyRoundSnapshot(getLobbySnapshot(roundSeed + 1, now, now));
         return;
       }
 
-      const arenaPlayers = getRoomPlayerSnapshots().filter((player) => player.phase === 'arena');
-      const allArenaPlayersDead = arenaPlayers.length > 0 && arenaPlayers.every((player) => player.isDead);
+      const snapshot = getRoundSnapshot(`local-game-${roundSeed}`, roomStartedAt, now, getRoomPlayerSnapshots(), playerPositionHistoryRef.current, arenaMode === 'duel');
 
-      if (allArenaPlayersDead) {
-        setRoomStartedAt(now);
-        setRoundSeed((current) => current + 1);
-        applyRoundSnapshot(getLobbySnapshot(snapshot.roundNumber + 1, now, now));
+      if (snapshot.phase === 'lobby') {
+        applyRoundSnapshot(snapshot);
         return;
       }
 
@@ -1221,10 +1619,292 @@ export function Lobby({ nickname, userId }: LobbyProps) {
     }, 250);
 
     return () => window.clearInterval(timer);
-  }, [isDead, phase, roomStartedAt, roundSeed]);
+  }, [arenaMode, gameStopped, phase, roomStartedAt, roundSeed]);
 
   useEffect(() => {
-    if (phase !== 'arena' || isDead) return;
+    const lobbyAudio = lobbyMusicRef.current;
+    const arenaAudio = arenaMusicRef.current;
+    if (!lobbyAudio || !arenaAudio) return;
+
+    if (phase === 'lobby' && !gameStopped && lobbyMusicEnabledRef.current) {
+      arenaAudio.pause();
+      arenaAudio.currentTime = 0;
+      lobbyAudio.volume = 0.45;
+      lobbyAudio.loop = true;
+      void lobbyAudio.play().catch(() => {
+        lobbyMusicEnabledRef.current = false;
+      });
+      return;
+    }
+
+    if (phase === 'arena' && !gameStopped && lobbyMusicEnabledRef.current) {
+      lobbyAudio.pause();
+      lobbyAudio.currentTime = 0;
+      arenaAudio.volume = 0.45;
+      arenaAudio.loop = true;
+      void arenaAudio.play().catch(() => {
+        lobbyMusicEnabledRef.current = false;
+      });
+      return;
+    }
+
+    lobbyAudio.pause();
+    lobbyAudio.currentTime = 0;
+    arenaAudio.pause();
+    arenaAudio.currentTime = 0;
+  }, [gameStopped, phase]);
+
+  useEffect(() => {
+    if (gameStopped || phase !== 'arena') return;
+
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const obstacleBounds = getActiveObjectBounds(hiddenArenaObjects);
+      const localSnapshot = playerSnapshotRef.current;
+      const aliveTargets = [localSnapshot, ...botsRef.current].filter((stickman): stickman is PlayerSnapshot | BotSnapshot => {
+        return Boolean(stickman && stickman.phase === 'arena' && !stickman.isDead && (arenaMode === 'main' || stickman.clientId === clientId));
+      });
+      const king = zombieKingRef.current;
+      const kingAlive = isZombieKingAlive(king);
+
+      if (!kingAlive) {
+        if (kingZombiesRef.current.length > 0) {
+          clearKingZombies();
+        }
+        nextZombieKingSpawnAtRef.current = 0;
+      }
+
+      if (king && kingAlive && now >= nextZombieKingSpawnAtRef.current) {
+        const directionVector = getDirectionVector(king.direction ?? 'back');
+        const baseX = king.position.x + directionVector.x * 72;
+        const baseY = king.position.y + directionVector.y * 72;
+        const sideX = directionVector.y === 0 ? 0 : 34;
+        const sideY = directionVector.x === 0 ? 0 : 34;
+        const spawnedZombies: Zombie[] = [-1, 1].map((side) => ({
+          id: `king-zombie-${now}-${side}`,
+          spawnedAt: now,
+          source: 'king',
+          kind: 'minion',
+          position: {
+            x: clamp(baseX + sideX * side, 34, worldWidth - 34),
+            y: clamp(baseY + sideY * side, 88, worldHeight - 34),
+          },
+          targetClientId: clientId,
+          health: zombieMinionMaxHealth,
+          maxHealth: zombieMinionMaxHealth,
+          direction: king.direction ?? 'back',
+        }));
+
+        nextZombieKingSpawnAtRef.current = now + zombieKingSpawnInterval;
+        setKingZombies((current) => [...current, ...spawnedZombies]);
+      }
+
+      setKingZombies((currentZombies) =>
+        (kingAlive ? currentZombies : [])
+          .filter((zombie) => !killedZombieIdsRef.current.has(zombie.id) && (zombie.health ?? 0) > 0)
+          .map((zombie) => {
+            const nearestTarget = aliveTargets
+              .slice()
+              .sort((a, b) => Math.hypot(a.position.x - zombie.position.x, a.position.y - zombie.position.y) - Math.hypot(b.position.x - zombie.position.x, b.position.y - zombie.position.y))[0];
+            if (!nearestTarget) return zombie;
+
+            const nextPosition = getPathChasePosition(zombie.position, nearestTarget.position, 1000, obstacleBounds, zombieSpeed);
+            return {
+              ...zombie,
+              position: nextPosition,
+              targetClientId: nearestTarget.clientId,
+              direction: getDirectionToward(zombie.position, nextPosition),
+            };
+          }),
+      );
+
+      setZombieKing((currentKing) => {
+        if (!currentKing || killedZombieIdsRef.current.has(currentKing.id) || (currentKing.health ?? 0) <= 0 || !localSnapshot || localSnapshot.isDead) return currentKing;
+
+        const nextPosition = getPathChasePosition(currentKing.position, localSnapshot.position, 1000, obstacleBounds, zombieKingSpeed);
+        const attackDistance = Math.hypot(localSnapshot.position.x - currentKing.position.x, localSnapshot.position.y - currentKing.position.y);
+        const swordSwinging = attackDistance <= zombieKingAttackDistance && Math.floor(now / zombieKingSwordCooldown) % 2 === 0;
+        const hitId = `${currentKing.id}:${clientId}`;
+
+        if (!isDeadRef.current && attackDistance <= zombieKingAttackDistance && now - (stickmanHitAtRef.current.get(hitId) ?? 0) >= zombieKingSwordCooldown) {
+          stickmanHitAtRef.current.set(hitId, now);
+          damagePlayer(swordDamage);
+        }
+
+        return {
+          ...currentKing,
+          position: nextPosition,
+          direction: getDirectionToward(currentKing.position, nextPosition),
+          swordSwinging,
+        };
+      });
+    }, 160);
+
+    return () => window.clearInterval(timer);
+  }, [arenaMode, clientId, gameStopped, hiddenArenaObjects, phase]);
+
+  useEffect(() => {
+    if (gameStopped || phase !== 'arena') return;
+
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const localSnapshot = playerSnapshotRef.current;
+
+      setBots((currentBots) => {
+        const duelFighters = new Set(duelState?.fighters ?? []);
+        const stickmen = [localSnapshot, ...currentBots].filter((stickman): stickman is PlayerSnapshot | BotSnapshot => {
+          if (!stickman || stickman.phase !== 'arena' || stickman.isDead) return false;
+          return arenaMode === 'main' || duelFighters.has(stickman.clientId);
+        });
+        const obstacleBounds = arenaMode === 'main' ? getBotObjectBounds(hiddenArenaObjects) : [];
+
+        return currentBots.map((bot) => {
+          if (bot.isDead || bot.phase !== 'arena' || (arenaMode === 'duel' && !duelFighters.has(bot.clientId))) {
+            botWanderTargetsRef.current.delete(bot.clientId);
+            botLastAnglesRef.current.delete(bot.clientId);
+            botStuckRef.current.delete(bot.clientId);
+            return { ...bot, swordSwinging: false };
+          }
+
+          if (bot.isFrozen) return { ...bot, swordSwinging: false };
+
+          const enemies = stickmen.filter((stickman) => stickman.clientId !== bot.clientId);
+          const nearestSwordThreat = bot.hasSword
+            ? undefined
+            : enemies
+                .filter((stickman) => stickman.hasSword)
+                .sort((a, b) => Math.hypot(a.position.x - bot.position.x, a.position.y - bot.position.y) - Math.hypot(b.position.x - bot.position.x, b.position.y - bot.position.y))[0];
+          const kingAlive = isZombieKingAlive();
+          const activeZombieThreats = [...zombies, ...(kingAlive ? kingZombiesRef.current : []), ...(kingAlive && zombieKingRef.current ? [zombieKingRef.current] : [])];
+          const nearestZombie = activeZombieThreats
+            .filter((zombie) => !killedZombieIdsRef.current.has(zombie.id))
+            .sort((a, b) => Math.hypot(a.position.x - bot.position.x, a.position.y - bot.position.y) - Math.hypot(b.position.x - bot.position.x, b.position.y - bot.position.y))[0];
+          const nearestTarget = enemies.sort(
+            (a, b) => Math.hypot(a.position.x - bot.position.x, a.position.y - bot.position.y) - Math.hypot(b.position.x - bot.position.x, b.position.y - bot.position.y),
+          )[0];
+          const threatDistance = nearestSwordThreat ? Math.hypot(nearestSwordThreat.position.x - bot.position.x, nearestSwordThreat.position.y - bot.position.y) : Number.POSITIVE_INFINITY;
+          const zombieDistance = nearestZombie ? Math.hypot(nearestZombie.position.x - bot.position.x, nearestZombie.position.y - bot.position.y) : Number.POSITIVE_INFINITY;
+          const speed = bot.isRapid ? botRapidSpeed : botSpeed;
+          let movementSpeed = speed;
+          let targetPosition: Position;
+          const sideEscapeAngle = getSideEscapeAngle(bot.position);
+
+          if (sideEscapeAngle !== undefined) {
+            clearBotFleeStarts(botFleeStartsRef.current, bot.clientId);
+            movementSpeed = speed * botFleeSpeedMultiplier;
+            const currentSegment = botWanderTargetsRef.current.get(bot.clientId);
+            if (currentSegment && Math.hypot(currentSegment.x - bot.position.x, currentSegment.y - bot.position.y) >= 18) {
+              targetPosition = currentSegment;
+            } else {
+              const segmentAngle = avoidReverseAngle(sideEscapeAngle, botLastAnglesRef.current.get(bot.clientId), `${bot.clientId}:${now}:side`);
+              botLastAnglesRef.current.set(bot.clientId, segmentAngle);
+              targetPosition = getDirectionalSegmentTarget(bot.position, segmentAngle, botSideEscapeDistance);
+              botWanderTargetsRef.current.set(bot.clientId, targetPosition);
+            }
+          } else if (nearestZombie && zombieDistance < botZombieFleeDistance) {
+            clearBotFleeStarts(botFleeStartsRef.current, bot.clientId);
+            movementSpeed = speed * botFleeSpeedMultiplier;
+            const currentSegment = botWanderTargetsRef.current.get(bot.clientId);
+            if (currentSegment && Math.hypot(currentSegment.x - bot.position.x, currentSegment.y - bot.position.y) >= 18) {
+              targetPosition = currentSegment;
+            } else {
+              const segmentAngle = avoidReverseAngle(
+                Math.atan2(bot.position.y - nearestZombie.position.y, bot.position.x - nearestZombie.position.x),
+                botLastAnglesRef.current.get(bot.clientId),
+                `${bot.clientId}:${now}:zombie`,
+              );
+              botLastAnglesRef.current.set(bot.clientId, segmentAngle);
+              targetPosition = getDirectionalSegmentTarget(bot.position, segmentAngle);
+              botWanderTargetsRef.current.set(bot.clientId, targetPosition);
+            }
+          } else if (nearestSwordThreat && threatDistance < botFleeDistance) {
+            const fleeKey = `${bot.clientId}:${nearestSwordThreat.clientId}`;
+            const currentFleeKey = [...botFleeStartsRef.current.keys()].find((key) => key.startsWith(`${bot.clientId}:`) && key !== fleeKey);
+            if (currentFleeKey) {
+              botFleeStartsRef.current.delete(currentFleeKey);
+              botWanderTargetsRef.current.delete(bot.clientId);
+            }
+
+            movementSpeed = speed * botFleeSpeedMultiplier;
+            const currentSegment = botWanderTargetsRef.current.get(bot.clientId);
+            if (currentSegment && Math.hypot(currentSegment.x - bot.position.x, currentSegment.y - bot.position.y) >= 18) {
+              targetPosition = currentSegment;
+            } else {
+              botFleeStartsRef.current.set(fleeKey, bot.position);
+              const segmentAngle = avoidReverseAngle(
+                Math.atan2(bot.position.y - nearestSwordThreat.position.y, bot.position.x - nearestSwordThreat.position.x),
+                botLastAnglesRef.current.get(bot.clientId),
+                `${bot.clientId}:${now}:sword`,
+              );
+              botLastAnglesRef.current.set(bot.clientId, segmentAngle);
+              targetPosition = getDirectionalSegmentTarget(bot.position, segmentAngle);
+              botWanderTargetsRef.current.set(bot.clientId, targetPosition);
+            }
+          } else if (bot.hasSword && nearestTarget) {
+            clearBotFleeStarts(botFleeStartsRef.current, bot.clientId);
+            botWanderTargetsRef.current.delete(bot.clientId);
+            targetPosition = nearestTarget.position;
+          } else {
+            clearBotFleeStarts(botFleeStartsRef.current, bot.clientId);
+            const currentWanderTarget = botWanderTargetsRef.current.get(bot.clientId);
+            const needsNewTarget =
+              !currentWanderTarget ||
+              Math.hypot(currentWanderTarget.x - bot.position.x, currentWanderTarget.y - bot.position.y) < 18 ||
+              collidesCharacterWithBounds(currentWanderTarget, obstacleBounds);
+
+            if (needsNewTarget) {
+              const wanderAngle = avoidReverseAngle(
+                ((hashText(`${bot.clientId}:${Math.floor(now / 9000)}`) % 360) * Math.PI) / 180,
+                botLastAnglesRef.current.get(bot.clientId),
+                `${bot.clientId}:${now}:wander`,
+              );
+              botLastAnglesRef.current.set(bot.clientId, wanderAngle);
+              const nextWanderTarget = getDirectionalSegmentTarget(bot.position, wanderAngle);
+
+              botWanderTargetsRef.current.set(bot.clientId, nextWanderTarget);
+              targetPosition = nextWanderTarget;
+            } else {
+              targetPosition = currentWanderTarget;
+            }
+          }
+
+          const dx = targetPosition.x - bot.position.x;
+          const dy = targetPosition.y - bot.position.y;
+          const distance = Math.hypot(dx, dy);
+          const finalPosition = getPathAwareStepPosition(bot.position, distance > 0 ? targetPosition : bot.position, movementSpeed, obstacleBounds, `${bot.clientId}:${now}`);
+          const movedDistance = Math.hypot(finalPosition.x - bot.position.x, finalPosition.y - bot.position.y);
+          const previousStuck = botStuckRef.current.get(bot.clientId);
+          const stuckTicks = movedDistance < 2 ? (previousStuck?.ticks ?? 0) + 1 : 0;
+          const isStuck = stuckTicks >= 3;
+
+          if (isStuck) {
+            botWanderTargetsRef.current.delete(bot.clientId);
+            botLastAnglesRef.current.delete(bot.clientId);
+            botStuckRef.current.delete(bot.clientId);
+          } else {
+            botStuckRef.current.set(bot.clientId, { position: finalPosition, ticks: stuckTicks });
+          }
+
+          const attackDistance = bot.hasSword && nearestTarget ? Math.hypot(nearestTarget.position.x - finalPosition.x, nearestTarget.position.y - finalPosition.y) : Number.POSITIVE_INFINITY;
+          const finalTargetPosition = bot.hasSword && nearestTarget ? nearestTarget.position : targetPosition;
+
+          return {
+            ...bot,
+            position: finalPosition,
+            direction: getDirectionToward(finalPosition, finalTargetPosition),
+            swordSwinging: bot.hasSword && attackDistance <= botAttackDistance && Math.floor(now / botSwingInterval) % 2 === 0,
+            updatedAt: now,
+          };
+        });
+      });
+    }, 160);
+
+    return () => window.clearInterval(timer);
+  }, [arenaMode, duelState, gameStopped, hiddenArenaObjects, phase, zombies]);
+
+  useEffect(() => {
+    if (gameStopped || phase !== 'arena' || isDead) return;
+    if (Date.now() < invulnerableUntilRef.current) return;
 
     fireHazards.forEach((hazard) => {
       if (damagedFireIdsRef.current.has(hazard.id)) return;
@@ -1233,11 +1913,12 @@ export function Lobby({ nickname, userId }: LobbyProps) {
       damagedFireIdsRef.current.add(hazard.id);
       damagePlayer(fireDamage);
     });
-  }, [fireHazards, isDead, phase, position]);
+  }, [fireHazards, gameStopped, isDead, phase, position]);
 
   useEffect(() => {
-    if (phase !== 'arena' || isDead) return;
+    if (gameStopped || phase !== 'arena' || isDead) return;
     const now = Date.now();
+    if (now < invulnerableUntilRef.current) return;
 
     doomsdayStrikes.forEach((strike) => {
       if (now < strike.hitAt) return;
@@ -1247,13 +1928,16 @@ export function Lobby({ nickname, userId }: LobbyProps) {
       damagedDoomsdayIdsRef.current.add(strike.id);
       damagePlayer(doomsdayDamage);
     });
-  }, [doomsdayStrikes, isDead, phase, position]);
+  }, [doomsdayStrikes, gameStopped, isDead, phase, position]);
 
   useEffect(() => {
-    if (phase !== 'arena') return;
+    if (gameStopped || phase !== 'arena') return;
     const now = Date.now();
+    const playerInvulnerable = now < invulnerableUntilRef.current;
 
-    zombies.forEach((zombie) => {
+    const activeKingZombies = isZombieKingAlive(zombieKing) ? kingZombies : [];
+
+    [...zombies, ...activeKingZombies].forEach((zombie) => {
       if (killedZombieIdsRef.current.has(zombie.id)) return;
 
       const killedByFire = fireHazards.some((hazard) => collidesZombieWithFire(zombie, hazard));
@@ -1264,70 +1948,127 @@ export function Lobby({ nickname, userId }: LobbyProps) {
         return;
       }
 
-      if (isDead || damagedZombieIdsRef.current.has(zombie.id) || !collidesWithZombie(zombie)) return;
+      if (playerInvulnerable || isDead || damagedZombieIdsRef.current.has(zombie.id) || !collidesWithZombie(zombie)) return;
 
       damagedZombieIdsRef.current.add(zombie.id);
       killedZombieIdsRef.current.add(zombie.id);
       damagePlayer(zombieDamage);
     });
-  }, [doomsdayStrikes, fireHazards, isDead, phase, position, zombies]);
+  }, [doomsdayStrikes, fireHazards, gameStopped, isDead, kingZombies, phase, position, zombieKing, zombies]);
 
   useEffect(() => {
-    if (phase !== 'arena') return;
+    if (gameStopped || phase !== 'arena') return;
+
+    const activeKingZombies = isZombieKingAlive(zombieKing) ? kingZombies : [];
+
+    [...zombies, ...activeKingZombies].forEach((zombie) => {
+      if (killedZombieIdsRef.current.has(zombie.id)) return;
+
+      bots.forEach((bot) => {
+        if (bot.isDead || !botCanTakeEventDamage(bot.clientId) || damagedZombieIdsRef.current.has(`${zombie.id}:${bot.clientId}`)) return;
+        if (!boxesOverlap(getZombieBox(zombie), getCharacterBox(bot.position))) return;
+
+        damagedZombieIdsRef.current.add(`${zombie.id}:${bot.clientId}`);
+        killedZombieIdsRef.current.add(zombie.id);
+        damageBot(bot.clientId, zombieDamage);
+      });
+    });
+  }, [bots, gameStopped, kingZombies, phase, zombieKing, zombies]);
+
+  useEffect(() => {
+    if (gameStopped || phase !== 'arena') return;
     const now = Date.now();
 
-    visibleBattleNpcs.forEach((npc) => {
-      fireHazards.forEach((hazard) => {
-        const hitId = `${npc.id}:${hazard.id}`;
-        if (damagedBattleNpcFireIdsRef.current.has(hitId)) return;
-        if (!collidesCharacterWithFire(npc.position, hazard)) return;
+    bots.forEach((bot) => {
+      if (bot.isDead || !botCanTakeEventDamage(bot.clientId, now)) return;
 
-        damagedBattleNpcFireIdsRef.current.add(hitId);
-        damageBattleNpc(npc.id, fireDamage);
+      fireHazards.forEach((hazard) => {
+        const hitId = `${bot.clientId}:${hazard.id}`;
+        if (damagedBotFireIdsRef.current.has(hitId)) return;
+        if (!collidesCharacterWithFire(bot.position, hazard)) return;
+
+        damagedBotFireIdsRef.current.add(hitId);
+        damageBot(bot.clientId, fireDamage);
       });
 
       doomsdayStrikes.forEach((strike) => {
-        const hitId = `${npc.id}:${strike.id}`;
-        if (now < strike.hitAt || damagedBattleNpcDoomsdayIdsRef.current.has(hitId)) return;
-        if (!collidesCharacterWithDoomsdayStrike(npc.position, strike)) return;
+        const hitId = `${bot.clientId}:${strike.id}`;
+        if (now < strike.hitAt || damagedBotDoomsdayIdsRef.current.has(hitId)) return;
+        if (!collidesCharacterWithDoomsdayStrike(bot.position, strike)) return;
 
-        damagedBattleNpcDoomsdayIdsRef.current.add(hitId);
-        damageBattleNpc(npc.id, doomsdayDamage);
+        damagedBotDoomsdayIdsRef.current.add(hitId);
+        damageBot(bot.clientId, doomsdayDamage);
       });
     });
-  }, [doomsdayStrikes, fireHazards, phase, visibleBattleNpcs]);
+  }, [bots, doomsdayStrikes, fireHazards, gameStopped, phase]);
 
   useEffect(() => {
-    if (phase !== 'arena') return;
+    if (gameStopped || phase !== 'arena') return;
 
     if (hasSword && swordSwinging) {
       const swingId = `${swordSwingStartedAtRef.current}:${direction}`;
       const swordBox = getSwordHitBox(position, direction);
 
-      visibleBattleNpcs.forEach((npc) => {
-        const hitId = `${npc.id}:${swingId}`;
-        if (damagedBattleNpcSwingIdsRef.current.has(hitId)) return;
-        if (!boxesOverlap(swordBox, getCharacterBox(npc.position))) return;
+      bots.forEach((bot) => {
+        if (bot.isDead) return;
+        if (arenaMode === 'duel' && duelState && !duelState.fighters.includes(bot.clientId)) return;
 
-        damagedBattleNpcSwingIdsRef.current.add(hitId);
-        damageBattleNpc(npc.id, battleNpcDamage);
+        const hitId = `${bot.clientId}:${swingId}`;
+        if (damagedBotSwingIdsRef.current.has(hitId)) return;
+        if (!boxesOverlap(swordBox, getCharacterBox(bot.position))) return;
+
+        damagedBotSwingIdsRef.current.add(hitId);
+        damageBot(bot.clientId, swordDamage);
       });
     }
 
-    if (isDead) return;
-
     const now = Date.now();
-    visibleBattleNpcs.forEach((npc) => {
-      if (!npc.swordSwinging) return;
-      if (!boxesOverlap(getSwordHitBox(npc.position, npc.direction), getCharacterBox(position))) return;
-      if (now - (battleNpcHitAtRef.current.get(npc.id) ?? 0) < battleNpcSwingInterval) return;
+    bots.forEach((bot) => {
+      if (bot.isDead || !bot.hasSword || !bot.swordSwinging) return;
+      const botSwordBox = getSwordHitBox(bot.position, bot.direction);
 
-      battleNpcHitAtRef.current.set(npc.id, now);
-      damagePlayer(battleNpcDamage);
+      if (!isDead && now >= invulnerableUntilRef.current && (arenaMode === 'main' || playerInActiveDuel) && boxesOverlap(botSwordBox, getCharacterBox(position))) {
+        const hitId = `${bot.clientId}:${clientId}`;
+        if (now - (stickmanHitAtRef.current.get(hitId) ?? 0) >= botSwingInterval) {
+          stickmanHitAtRef.current.set(hitId, now);
+          damagePlayer(swordDamage);
+        }
+      }
+
+      bots.forEach((targetBot) => {
+        if (targetBot.clientId === bot.clientId || targetBot.isDead) return;
+        if (arenaMode === 'duel' && duelState && (!duelState.fighters.includes(bot.clientId) || !duelState.fighters.includes(targetBot.clientId))) return;
+        if (!boxesOverlap(botSwordBox, getCharacterBox(targetBot.position))) return;
+
+        const hitId = `${bot.clientId}:${targetBot.clientId}`;
+        if (now - (stickmanHitAtRef.current.get(hitId) ?? 0) < botSwingInterval) return;
+
+        stickmanHitAtRef.current.set(hitId, now);
+        damageBot(targetBot.clientId, swordDamage);
+      });
     });
-  }, [direction, hasSword, isDead, phase, position, swordSwinging, visibleBattleNpcs]);
+  }, [arenaMode, bots, clientId, direction, duelState, gameStopped, hasSword, isDead, phase, playerInActiveDuel, position, swordSwinging]);
 
   useEffect(() => {
+    if (gameStopped || !duelState) return;
+
+    const fighters = duelState.fighters.map((fighterId) => getStickmanById(fighterId)).filter((fighter): fighter is PlayerSnapshot | BotSnapshot => Boolean(fighter));
+    const aliveFighters = fighters.filter((fighter) => !fighter.isDead);
+
+    if (aliveFighters.length === 1) {
+      finishDuel(aliveFighters[0].clientId);
+    } else if (aliveFighters.length === 0) {
+      setArenaMode('main');
+      setDuelState(null);
+    }
+  }, [bots, duelState, gameStopped, health, isDead]);
+
+  useEffect(() => {
+    if (gameStopped) {
+      pressedKeys.current.clear();
+      return;
+    }
+
     function onKeyDown(event: KeyboardEvent) {
       const key = event.key.toLowerCase();
       if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd'].includes(key)) {
@@ -1374,13 +2115,15 @@ export function Lobby({ nickname, userId }: LobbyProps) {
       window.clearInterval(timer);
       if (swordTimerRef.current) window.clearTimeout(swordTimerRef.current);
     };
-  }, [canMove, hiddenArenaObjects, movementStep, phase]);
+  }, [canMove, gameStopped, hiddenArenaObjects, movementStep, phase]);
 
   useEffect(() => {
     if (isFrozen) pressedKeys.current.clear();
   }, [isFrozen]);
 
   useEffect(() => {
+    if (gameStopped) return;
+
     if (phase !== 'lobby') {
       setShopOpen(false);
       setShopDismissed(false);
@@ -1393,7 +2136,7 @@ export function Lobby({ nickname, userId }: LobbyProps) {
       setShopOpen(false);
       setShopDismissed(false);
     }
-  }, [phase, position, shopDismissed]);
+  }, [gameStopped, phase, position, shopDismissed]);
 
   function getFrameScale() {
     const frame = frameRef.current;
@@ -1410,6 +2153,15 @@ export function Lobby({ nickname, userId }: LobbyProps) {
     return {
       x: nextPosition.x * scale.x,
       y: nextPosition.y * scale.y,
+    };
+  }
+
+  function screenToWorld(screenPosition: Position) {
+    const scale = getFrameScale();
+
+    return {
+      x: screenPosition.x / scale.x,
+      y: screenPosition.y / scale.y,
     };
   }
 
@@ -1443,6 +2195,7 @@ export function Lobby({ nickname, userId }: LobbyProps) {
   }
 
   function getActiveArenaObstacleBounds() {
+    if (arenaMode === 'duel') return [];
     return getActiveObjectBounds(hiddenArenaObjects);
   }
 
@@ -1689,7 +2442,7 @@ export function Lobby({ nickname, userId }: LobbyProps) {
   }
 
   function swingSword() {
-    if (isDead) return;
+    if (gameStopped || isDead || isFrozen || (arenaMode === 'duel' && !playerInActiveDuel)) return;
 
     setSwordSwinging(false);
     if (swordTimerRef.current) window.clearTimeout(swordTimerRef.current);
@@ -1703,18 +2456,103 @@ export function Lobby({ nickname, userId }: LobbyProps) {
     });
   }
 
+  function shootGunAt(screenPosition: Position) {
+    const kingAlive = isZombieKingAlive(zombieKing);
+    if (gameStopped || phase !== 'arena' || equippedItem !== 'gun' || !kingAlive || !zombieKing || isDead) return;
+
+    const targetPosition = screenToWorld(screenPosition);
+    const shootableZombies = [
+      ...kingZombies.filter((zombie) => !killedZombieIdsRef.current.has(zombie.id) && (zombie.health ?? 0) > 0),
+      zombieKing,
+    ];
+    const hitZombie = shootableZombies
+      .map((zombie) => ({
+        zombie,
+        distance: Math.hypot(zombie.position.x - targetPosition.x, zombie.position.y - targetPosition.y),
+      }))
+      .filter(({ zombie, distance }) => distance <= (zombie.kind === 'king' ? 86 : 58))
+      .sort((a, b) => a.distance - b.distance)[0]?.zombie;
+
+    if (!hitZombie) return;
+
+    if (hitZombie.kind === 'king') {
+      damageZombieKing(gunDamage);
+    } else {
+      damageKingZombie(hitZombie.id, gunDamage);
+    }
+  }
+
+  if (menuOpen) {
+    return (
+      <section className="main-menu" aria-label="Main menu">
+        <audio ref={lobbyMusicRef} src={lobbyMusicSrc} preload="auto" />
+        <audio ref={arenaMusicRef} src={arenaMusicSrc} preload="auto" />
+        <div className="main-menu-scene">
+          <div className="main-menu-sun" />
+          <div className="main-menu-ground" />
+          <div className="main-menu-stickman">
+            <span className="head" />
+            <span className="torso" />
+            <span className="arm left-arm" />
+            <span className="arm right-arm" />
+            <span className="leg left-leg" />
+            <span className="leg right-leg" />
+          </div>
+        </div>
+        <div className="main-menu-content">
+          <h1>Absolute cineWHAT?</h1>
+          <div className="main-menu-buttons" role="group" aria-label="Menu actions">
+            <button type="button" onClick={startFromMenu}>
+              Play
+            </button>
+            <button type="button" className={menuPanel === 'gamemods' ? 'active' : ''} onClick={() => setMenuPanel('gamemods')}>
+              Gamemods
+            </button>
+            <button type="button" className={menuPanel === 'settings' ? 'active' : ''} onClick={() => setMenuPanel('settings')}>
+              Settings
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="lobby">
+      <audio ref={lobbyMusicRef} src={lobbyMusicSrc} preload="auto" />
+      <audio ref={arenaMusicRef} src={arenaMusicSrc} preload="auto" />
       <div className="lobby-topbar">
         <div>
           <p className="eyebrow">Classic lobby</p>
-          <h2>{phase === 'lobby' ? 'Spawn Plaza' : 'Brickbattle Arena'}</h2>
+          <h2>{phase === 'lobby' ? 'Spawn Plaza' : arenaMode === 'duel' ? 'Battle To Death' : 'Brickbattle Arena'}</h2>
         </div>
         <div className="round-info">
-          <p className="round-label">{phase === 'lobby' ? 'Teleporting in' : 'Round ends in'}</p>
+          <p className="round-label">{phase === 'lobby' ? 'Teleporting in' : 'Arena time'}</p>
           <p className="round-timer">{formatTime(timeLeft)}</p>
         </div>
+        {phase === 'arena' && (
+          <button type="button" className="pause-toggle" onClick={togglePause}>
+            {isPaused ? 'Resume' : 'Pause'}
+          </button>
+        )}
+        <button
+          type="button"
+          className="menu-toggle"
+          onClick={() => {
+            pressedKeys.current.clear();
+            setMenuPanel('main');
+            setMenuOpen(true);
+          }}
+        >
+          Menu
+        </button>
       </div>
+
+      {phase === 'arena' && deathMessage && (
+        <div className="death-announcement" role="status" aria-live="assertive">
+          {deathMessage}
+        </div>
+      )}
 
       {phase === 'arena' && serverAnnouncement && (
         <div className="server-announcement" role="status" aria-live="polite">
@@ -1723,12 +2561,38 @@ export function Lobby({ nickname, userId }: LobbyProps) {
         </div>
       )}
 
+      {phase === 'arena' && isPaused && (
+        <div className="pause-announcement" role="status" aria-live="polite">
+          Paused
+        </div>
+      )}
+
+      {phase === 'arena' && (
+        <div className="player-inventory" aria-label="Player inventory">
+          <span>Inventory</span>
+          <button type="button" className={equippedItem === 'sword' ? 'active' : ''} disabled={!hasSword} onClick={() => setEquippedItem('sword')}>
+            Sword
+          </button>
+          {isZombieKingAlive(zombieKing) && (
+            <button type="button" className={equippedItem === 'gun' ? 'active' : ''} onClick={() => setEquippedItem('gun')}>
+              Gun
+            </button>
+          )}
+        </div>
+      )}
+
       <div
         ref={frameRef}
-        className={`game-frame ${phase}`}
+        className={`game-frame ${phase} ${arenaMode}`}
         aria-label="2D classic map"
-        onPointerDown={() => {
-          if (phase === 'arena') swingSword();
+        onPointerDown={(event) => {
+          if (phase !== 'arena' || (arenaMode !== 'main' && !playerInActiveDuel)) return;
+          if (equippedItem === 'gun') {
+            const rect = event.currentTarget.getBoundingClientRect();
+            shootGunAt({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+          } else {
+            swingSword();
+          }
         }}
       >
         {phase === 'lobby' ? (
@@ -1785,15 +2649,11 @@ export function Lobby({ nickname, userId }: LobbyProps) {
               </div>
             </div>
           </>
-        ) : (
+        ) : arenaMode === 'main' ? (
           <>
             <div className="arena-center">
               <span>ARENA</span>
             </div>
-            {!hiddenArenaObjects.includes('arena-wall-top') && <div className="arena-wall arena-wall-top solid-obstacle" />}
-            {!hiddenArenaObjects.includes('arena-wall-bottom') && <div className="arena-wall arena-wall-bottom solid-obstacle" />}
-            {!hiddenArenaObjects.includes('arena-wall-left') && <div className="arena-wall arena-wall-left solid-obstacle" />}
-            {!hiddenArenaObjects.includes('arena-wall-right') && <div className="arena-wall arena-wall-right solid-obstacle" />}
             {!hiddenArenaObjects.includes('fort-red') && (
               <div className="arena-fort fort-red solid-obstacle">
                 <span />
@@ -1809,7 +2669,15 @@ export function Lobby({ nickname, userId }: LobbyProps) {
             {!hiddenArenaObjects.includes('column-one') && <div className="arena-column column-one solid-obstacle" />}
             {!hiddenArenaObjects.includes('column-two') && <div className="arena-column column-two solid-obstacle" />}
             {!hiddenArenaObjects.includes('column-three') && <div className="arena-column column-three solid-obstacle" />}
+            {!hiddenArenaObjects.includes('arena-tree-one') && <div className="arena-tree arena-tree-one" />}
+            {!hiddenArenaObjects.includes('arena-tree-two') && <div className="arena-tree arena-tree-two" />}
+            {!hiddenArenaObjects.includes('arena-tree-three') && <div className="arena-tree arena-tree-three" />}
+            {!hiddenArenaObjects.includes('arena-tree-four') && <div className="arena-tree arena-tree-four" />}
           </>
+        ) : (
+          <div className="arena-center">
+            <span>DUEL</span>
+          </div>
         )}
 
         {phase === 'arena' &&
@@ -1858,19 +2726,26 @@ export function Lobby({ nickname, userId }: LobbyProps) {
         {phase === 'arena' &&
           zombies
             .filter((zombie) => !killedZombieIdsRef.current.has(zombie.id))
-            .map((zombie) => <ZombieAvatar key={zombie.id} position={worldToScreen(zombie.position)} />)}
+            .map((zombie) => <ZombieAvatar key={zombie.id} zombie={zombie} position={worldToScreen(zombie.position)} />)}
 
         {phase === 'arena' &&
-          visibleBattleNpcs.map((npc) => (
-            <BattleNpcAvatar
-              key={npc.id}
-              npc={npc}
-              position={worldToScreen(npc.position)}
-              health={battleNpcHealth[npc.id] ?? battleNpcMaxHealth}
-            />
-          ))}
+          isZombieKingAlive(zombieKing) &&
+          kingZombies
+            .filter((zombie) => !killedZombieIdsRef.current.has(zombie.id) && (zombie.health ?? 0) > 0)
+            .map((zombie) => <ZombieAvatar key={zombie.id} zombie={zombie} position={worldToScreen(zombie.position)} />)}
 
-        <PlayerAvatar player={playerSnapshot} position={worldToScreen(playerSnapshot.position)} isLocal />
+        {phase === 'arena' && isZombieKingAlive(zombieKing) && zombieKing && (
+          <ZombieAvatar zombie={zombieKing} position={worldToScreen(zombieKing.position)} />
+        )}
+
+        {phase === 'arena' &&
+          bots
+            .filter((bot) => arenaMode === 'main' || duelState?.fighters.includes(bot.clientId))
+            .map((bot) => <PlayerAvatar key={bot.clientId} player={bot} position={worldToScreen(bot.position)} />)}
+
+        {(phase === 'lobby' || arenaMode === 'main' || playerInActiveDuel) && (
+          <PlayerAvatar player={playerSnapshot} position={worldToScreen(playerSnapshot.position)} isLocal />
+        )}
       </div>
 
       {shopOpen && (

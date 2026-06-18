@@ -7,6 +7,7 @@ import { Lobby } from './components/Lobby';
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  const [gameMenuOpen, setGameMenuOpen] = useState(true);
   const nickname =
     session?.user.user_metadata.full_name ||
     session?.user.email?.split('@')[0] ||
@@ -35,10 +36,10 @@ export default function App() {
 
   return (
     <main className="container">
-      <header className="header">
-        <h1>{session ? 'Spawn Plaza' : 'My Project'}</h1>
+      <header className={`header ${session && gameMenuOpen ? 'menu-header' : ''}`}>
+        {(!session || !gameMenuOpen) && <h1>{session ? 'Spawn Plaza' : 'My Project'}</h1>}
         {session && (
-          <button className="ghost" onClick={() => supabase.auth.signOut()}>
+          <button className={gameMenuOpen ? 'menu-sign-out' : 'ghost'} onClick={() => supabase.auth.signOut()}>
             Sign out
           </button>
         )}
@@ -47,7 +48,7 @@ export default function App() {
       {!session ? (
         <Auth onAuthenticated={setSession} />
       ) : (
-        <Lobby nickname={nickname} userId={session.user.id} />
+        <Lobby nickname={nickname} userId={session.user.id} onMenuOpenChange={setGameMenuOpen} />
       )}
     </main>
   );

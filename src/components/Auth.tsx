@@ -151,6 +151,26 @@ export function Auth({ onAuthenticated }: AuthProps) {
     }
   }
 
+  async function handleGoogleSignIn() {
+    setBusy(true);
+    setMessage('');
+
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin,
+        },
+      });
+
+      if (error) showMessage(error.message);
+    } catch {
+      showMessage('Google sign in failed. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="auth-shell">
       <div className="auth-panel">
@@ -270,6 +290,18 @@ export function Auth({ onAuthenticated }: AuthProps) {
                   : 'Send reset link'}
           </button>
         </form>
+
+        {!isReset && (
+          <div className="oauth-actions">
+            <div className="auth-divider">
+              <span>or</span>
+            </div>
+            <button type="button" className="google-auth-button" disabled={busy} onClick={handleGoogleSignIn}>
+              <span aria-hidden="true">G</span>
+              Continue with Google
+            </button>
+          </div>
+        )}
 
         <div className="auth-links">
           {mode === 'signin' && (
