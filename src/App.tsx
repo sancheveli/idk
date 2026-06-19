@@ -4,6 +4,15 @@ import { supabase } from './lib/supabase';
 import { Auth } from './components/Auth';
 import { Lobby } from './components/Lobby';
 
+function clearSavedRuns() {
+  Object.keys(window.localStorage)
+    .filter((key) => key.startsWith('brickbattle-run:'))
+    .forEach((key) => window.localStorage.removeItem(key));
+  Object.keys(window.sessionStorage)
+    .filter((key) => key.startsWith('brickbattle-run-session:'))
+    .forEach((key) => window.sessionStorage.removeItem(key));
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -36,14 +45,20 @@ export default function App() {
 
   return (
     <main className="container">
-      <header className={`header ${session && gameMenuOpen ? 'menu-header' : ''}`}>
-        {(!session || !gameMenuOpen) && <h1>{session ? 'Spawn Plaza' : 'My Project'}</h1>}
-        {session && (
-          <button className={gameMenuOpen ? 'menu-sign-out' : 'ghost'} onClick={() => supabase.auth.signOut()}>
+      {session && (
+        <header className={`header ${gameMenuOpen ? 'menu-header' : ''}`}>
+          {!gameMenuOpen && <h1>Spawn Plaza</h1>}
+          <button
+            className={gameMenuOpen ? 'menu-sign-out' : 'ghost'}
+            onClick={() => {
+              clearSavedRuns();
+              void supabase.auth.signOut();
+            }}
+          >
             Sign out
           </button>
-        )}
-      </header>
+        </header>
+      )}
 
       {!session ? (
         <Auth onAuthenticated={setSession} />

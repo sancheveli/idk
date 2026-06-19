@@ -115,18 +115,80 @@ type Bounds = {
   height: number;
 };
 type BoundsResolver = Bounds | ((width: number, height: number) => Bounds);
+type SavedLobbyRunV1 = {
+  version: 1;
+  savedAt: number;
+  joinedAt: number;
+  phase: GamePhase;
+  menuOpen: boolean;
+  menuPanel: MenuPanel;
+  isPaused: boolean;
+  timeLeft: number;
+  roundEndsAt: number;
+  roomStartedAt: number;
+  roundSeed: number;
+  runRandomSeed: string;
+  spawnPlaced: boolean;
+  position: Position;
+  direction: Direction;
+  shopOpen: boolean;
+  shopDismissed: boolean;
+  swordSwinging: boolean;
+  swordSwingStartedAt: number;
+  serverAnnouncement: string;
+  hasSword: boolean;
+  isRapid: boolean;
+  missingRightLeg: boolean;
+  isBlue: boolean;
+  isRed: boolean;
+  isGreen: boolean;
+  isFrozen: boolean;
+  hiddenArenaObjects: string[];
+  destroyedArenaObjects: string[];
+  fireHazards: FireHazard[];
+  doomsdayStrikes: DoomsdayStrike[];
+  zombies: Zombie[];
+  zombieKing: Zombie | null;
+  kingZombies: Zombie[];
+  equippedItem: 'sword' | 'gun';
+  bots: BotSnapshot[];
+  arenaMode: ArenaMode;
+  duelState: DuelState | null;
+  deathMessage: string;
+  health: number;
+  isDead: boolean;
+  deathReturnAt: number;
+  invulnerableUntil: number;
+  nextZombieKingSpawnAt: number;
+  kingSpawnedAfterBots: boolean;
+  killedZombieIds: string[];
+  damagedZombieIds: string[];
+  damagedFireIds: string[];
+  damagedDoomsdayIds: string[];
+  handledEventIds: string[];
+  damagedBotSwingIds: string[];
+  damagedBotFireIds: string[];
+  damagedBotDoomsdayIds: string[];
+  botDeadAt: Array<[string, number]>;
+  botEventImmuneUntil: Array<[string, number]>;
+  playerPositionHistory: Array<{ position: Position; recordedAt: number }>;
+};
 
 const baseStep = 14;
 const rapidStep = 24;
 const worldWidth = 1155;
 const worldHeight = 635;
-const lobbyDuration = 30;
+const lobbyDuration = 20;
 const eventInterval = 7;
 const postDoomsdayEventDelay = 20;
 const deathReturnDelay = 2200;
 const eventTimelineLimit = 900;
+const menuMusicSrc = '/audio/noob-alert.mp3';
 const lobbyMusicSrc = '/audio/lobby-music.mp3';
 const arenaMusicSrc = '/audio/arena-music.mp3';
+const arenaSecondMusicSrc = '/audio/online-social-hangout.mp3';
+const savedRunVersion = 1;
+const savedRunMaxAge = 12 * 60 * 60 * 1000;
 const lobbySpawnSlots: Position[] = [
   { x: 500, y: 330 },
   { x: 414, y: 330 },
@@ -174,7 +236,7 @@ const serverAnnouncements: ServerEvent[] = [
   'Someone will turn red',
   'Someone will turn green',
 ];
-const explosiveObjects = ['fort-red', 'fort-blue', 'column-one', 'column-two', 'column-three', 'arena-tree-one', 'arena-tree-two', 'arena-tree-three', 'arena-tree-four'];
+const explosiveObjects = ['fort-red', 'fort-blue', 'column-one', 'column-two', 'column-three', 'arena-tree-two', 'arena-tree-three', 'arena-tree-four'];
 const fireDuration = 12000;
 const fireDamage = 30;
 const doomsdayDamage = 60;
@@ -205,6 +267,7 @@ const botSideEscapeDistance = 200;
 const botAttackDistance = 118;
 const botSwingInterval = 520;
 const duelReturnGraceDuration = 1600;
+const botRespawnEventPauseDuration = 10000;
 const playerEventEffectDuration = 10000;
 const freezeDuration = eventInterval * 1000;
 const zombiePathCellSize = 28;
@@ -222,7 +285,6 @@ const desktopFireBounds: Record<string, BoundsResolver> = {
   'column-one': { x: 386, y: 160, width: 58, height: 58 },
   'column-two': (width, height) => ({ x: width - 444, y: height - 212, width: 58, height: 58 }),
   'column-three': (width, height) => ({ x: width / 2 - 29, y: height - 190, width: 58, height: 58 }),
-  'arena-tree-one': { x: 106, y: 94, width: 70, height: 92 },
   'arena-tree-two': (width) => ({ x: width - 174, y: 106, width: 70, height: 92 }),
   'arena-tree-three': (_width, height) => ({ x: 136, y: height - 168, width: 70, height: 92 }),
   'arena-tree-four': (width, height) => ({ x: width - 228, y: height - 176, width: 70, height: 92 }),
@@ -252,6 +314,67 @@ function getClientId(userId: string) {
   return nextClientId;
 }
 
+function getSavedRunStorageKey(clientId: string) {
+  return `brickbattle-run:${clientId}`;
+}
+
+function getSavedRunSessionKey(clientId: string) {
+  return `brickbattle-run-session:${clientId}`;
+}
+
+function readSavedLobbyRun(clientId: string): SavedLobbyRunV1 | null {
+  try {
+    const storageKey = getSavedRunStorageKey(clientId);
+    const sessionKey = getSavedRunSessionKey(clientId);
+    if (window.sessionStorage.getItem(sessionKey) !== 'active') {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
+    const rawRun = window.localStorage.getItem(storageKey);
+    if (!rawRun) return null;
+
+    const parsed = JSON.parse(rawRun) as SavedLobbyRunV1;
+    if (parsed.version !== savedRunVersion || Date.now() - parsed.savedAt > savedRunMaxAge) {
+      window.localStorage.removeItem(storageKey);
+      window.sessionStorage.removeItem(sessionKey);
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    window.localStorage.removeItem(getSavedRunStorageKey(clientId));
+    window.sessionStorage.removeItem(getSavedRunSessionKey(clientId));
+    return null;
+  }
+}
+
+function writeSavedLobbyRun(clientId: string, run: SavedLobbyRunV1) {
+  try {
+    window.localStorage.setItem(getSavedRunStorageKey(clientId), JSON.stringify(run));
+    window.sessionStorage.setItem(getSavedRunSessionKey(clientId), 'active');
+  } catch {
+    // Ignore quota/private-mode failures; the game should keep running.
+  }
+}
+
+function clearSavedLobbyRun(clientId: string) {
+  try {
+    window.localStorage.removeItem(getSavedRunStorageKey(clientId));
+    window.sessionStorage.removeItem(getSavedRunSessionKey(clientId));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function shiftFiniteTimestamp(value: number, duration: number) {
+  return Number.isFinite(value) ? value + duration : value;
+}
+
+function shiftActiveTimestamp(value: number, duration: number) {
+  return value > 0 && Number.isFinite(value) ? value + duration : value;
+}
+
 function hashText(text: string) {
   let hash = 0;
 
@@ -262,7 +385,20 @@ function hashText(text: string) {
   return hash;
 }
 
-function getDeterministicEvent(serverId: string, roundNumber: number, eventSlot: number, excludedEvents: ServerEvent[] = []) {
+function createRunRandomSeed() {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+}
+
+function getDeterministicShuffle<T>(items: T[], seed: string, getKey: (item: T) => string) {
+  return [...items].sort((first, second) => {
+    const firstHash = hashText(`${seed}:${getKey(first)}`);
+    const secondHash = hashText(`${seed}:${getKey(second)}`);
+    if (firstHash !== secondHash) return firstHash - secondHash;
+    return getKey(first).localeCompare(getKey(second));
+  });
+}
+
+function getDeterministicEvent(serverId: string, runRandomSeed: string, roundNumber: number, eventSlot: number, excludedEvents: ServerEvent[] = []) {
   if (eventSlot > 0 && eventSlot % 8 === 0) return 'SURVIVE THE DOOMSDAY';
   if (eventSlot > 0 && eventSlot % 9 === 0) return 'BATTLE TO DEATH';
   if (eventSlot > 0 && eventSlot % 6 === 0) return 'Zombie apocalypse';
@@ -270,16 +406,17 @@ function getDeterministicEvent(serverId: string, roundNumber: number, eventSlot:
   const reservedEvents: ServerEvent[] = ['SURVIVE THE DOOMSDAY', 'Zombie apocalypse', 'BATTLE TO DEATH'];
   const unavailableEvents = new Set<ServerEvent>([...reservedEvents, ...excludedEvents]);
   const availableEvents = serverAnnouncements.filter((event) => !unavailableEvents.has(event));
-  const eventIndex = hashText(`${serverId}:${roundNumber}:${eventSlot}:event`) % availableEvents.length;
-  return availableEvents[eventIndex];
+  const eventCycle = Math.floor((eventSlot - 1) / Math.max(1, availableEvents.length));
+  const shuffledEvents = getDeterministicShuffle(availableEvents, `${serverId}:${runRandomSeed}:${roundNumber}:${eventCycle}:events`, (event) => event);
+  return shuffledEvents[(eventSlot - 1) % shuffledEvents.length];
 }
 
-function getDeterministicExplosiveObject(serverId: string, roundNumber: number, eventSlot: number, usedObjects: string[]) {
+function getDeterministicExplosiveObject(serverId: string, runRandomSeed: string, roundNumber: number, eventSlot: number, usedObjects: string[]) {
   const availableObjects = explosiveObjects.filter((object) => !usedObjects.includes(object));
   if (availableObjects.length === 0) return undefined;
 
-  const objectIndex = hashText(`${serverId}:${roundNumber}:${eventSlot}:explode`) % availableObjects.length;
-  return availableObjects[objectIndex];
+  const shuffledObjects = getDeterministicShuffle(availableObjects, `${serverId}:${runRandomSeed}:${roundNumber}:${eventSlot}:explode`, (objectId) => objectId);
+  return shuffledObjects[0];
 }
 
 function getBaseObjectBounds(objectId: string) {
@@ -287,9 +424,9 @@ function getBaseObjectBounds(objectId: string) {
   return typeof boundsResolver === 'function' ? boundsResolver(doomsdayBaseWidth, doomsdayBaseHeight) : boundsResolver;
 }
 
-function getFallbackFireBounds(serverId: string, roundNumber: number, eventSlot: number) {
-  const xHash = hashText(`${serverId}:${roundNumber}:${eventSlot}:fallback-fire-x`);
-  const yHash = hashText(`${serverId}:${roundNumber}:${eventSlot}:fallback-fire-y`);
+function getFallbackFireBounds(serverId: string, runRandomSeed: string, roundNumber: number, eventSlot: number) {
+  const xHash = hashText(`${serverId}:${runRandomSeed}:${roundNumber}:${eventSlot}:fallback-fire-x`);
+  const yHash = hashText(`${serverId}:${runRandomSeed}:${roundNumber}:${eventSlot}:fallback-fire-y`);
 
   return {
     x: 120 + (xHash % 780),
@@ -482,10 +619,11 @@ function getDeterministicDoomsdayStrike(
   };
 }
 
-function getDeterministicTarget(clientIds: string[], serverId: string, roundNumber: number, eventSlot: number) {
+function getDeterministicTarget(clientIds: string[], serverId: string, runRandomSeed: string, roundNumber: number, eventSlot: number) {
   if (clientIds.length === 0) return '';
-  const targetIndex = hashText(`${serverId}:${roundNumber}:${eventSlot}:target`) % clientIds.length;
-  return clientIds[targetIndex];
+  const targetCycle = Math.floor((eventSlot - 1) / Math.max(1, clientIds.length));
+  const shuffledTargets = getDeterministicShuffle(clientIds, `${serverId}:${runRandomSeed}:${roundNumber}:${targetCycle}:targets`, (clientId) => clientId);
+  return shuffledTargets[(eventSlot - 1) % shuffledTargets.length];
 }
 
 function getNearestAliveStickman(position: Position, players: PlayerSnapshot[]) {
@@ -508,10 +646,10 @@ function getPositionAt(history: Array<{ position: Position; recordedAt: number }
   return closest?.position ?? fallback;
 }
 
-function getDeterministicZombieSpawn(serverId: string, roundNumber: number, eventSlot: number, targetClientId: string, clientIds: string[]) {
+function getDeterministicZombieSpawn(serverId: string, runRandomSeed: string, roundNumber: number, eventSlot: number, targetClientId: string, clientIds: string[]) {
   const targetSpawn = getSpawnSlot('arena', targetClientId, clientIds);
-  const angleHash = hashText(`${serverId}:${roundNumber}:${eventSlot}:${targetClientId}:zombie-angle`);
-  const distanceHash = hashText(`${serverId}:${roundNumber}:${eventSlot}:${targetClientId}:zombie-distance`);
+  const angleHash = hashText(`${serverId}:${runRandomSeed}:${roundNumber}:${eventSlot}:${targetClientId}:zombie-angle`);
+  const distanceHash = hashText(`${serverId}:${runRandomSeed}:${roundNumber}:${eventSlot}:${targetClientId}:zombie-distance`);
   const angle = (angleHash % 360) * (Math.PI / 180);
   const distance = 72 + (distanceHash % 44);
 
@@ -623,6 +761,19 @@ function getDirectionalSegmentTarget(origin: Position, angle: number, distance =
   };
 }
 
+function getOpenDirectionalSegmentTarget(origin: Position, angle: number, obstacleBounds: Bounds[], seed: string, distance = botMovementSegmentDistance) {
+  const offsets = [0, Math.PI / 5, -Math.PI / 5, Math.PI / 3, -Math.PI / 3, Math.PI / 2, -Math.PI / 2, Math.PI];
+  const seedAngle = ((hashText(`${seed}:open-target`) % 360) * Math.PI) / 180;
+  const candidateAngles = [...offsets.map((offset) => angle + offset), ...offsets.map((offset) => seedAngle + offset)];
+
+  for (const candidateAngle of candidateAngles) {
+    const candidate = getDirectionalSegmentTarget(origin, candidateAngle, distance);
+    if (!collidesCharacterWithBounds(candidate, obstacleBounds)) return candidate;
+  }
+
+  return getOpenStepPosition(origin, getDirectionalSegmentTarget(origin, angle, distance), Math.min(80, distance), obstacleBounds, seed);
+}
+
 function getSideEscapeAngle(position: Position) {
   const nearLeft = position.x < 115;
   const nearRight = position.x > worldWidth - 115;
@@ -702,6 +853,7 @@ function getLobbySnapshot(roundNumber: number, now: number, lobbyStartedAt = now
 
 function getRoundSnapshot(
   serverId: string,
+  runRandomSeed: string,
   roomStartedAt: number,
   now: number,
   players: PlayerSnapshot[],
@@ -764,13 +916,13 @@ function getRoundSnapshot(
     eventSlot += 1;
     const slot = eventSlot;
     const eventStartedAt = roomStartedAt + (lobbyDuration + nextEventSecond) * 1000;
-    const event = getDeterministicEvent(serverId, roundNumber, slot, previousEvent === 'SURVIVE THE DOOMSDAY' ? ['SURVIVE THE DOOMSDAY'] : []);
+    const event = getDeterministicEvent(serverId, runRandomSeed, roundNumber, slot, previousEvent === 'SURVIVE THE DOOMSDAY' ? ['SURVIVE THE DOOMSDAY'] : []);
     serverAnnouncement = event;
     currentEventStartedAt = eventStartedAt;
 
     if (event === 'Something will explode') {
-      const explodedObject = getDeterministicExplosiveObject(serverId, roundNumber, slot, hiddenArenaObjects);
-      const fallbackBounds = getFallbackFireBounds(serverId, roundNumber, slot);
+      const explodedObject = getDeterministicExplosiveObject(serverId, runRandomSeed, roundNumber, slot, hiddenArenaObjects);
+      const fallbackBounds = getFallbackFireBounds(serverId, runRandomSeed, roundNumber, slot);
 
       if (explodedObject) {
         const bounds = getBaseObjectBounds(explodedObject) ?? fallbackBounds;
@@ -829,7 +981,7 @@ function getRoundSnapshot(
         const activeObstacleBounds = getActiveObjectBounds(hiddenArenaObjects);
 
         clientIds.forEach((targetClientId) => {
-          const spawn = getDeterministicZombieSpawn(serverId, roundNumber, slot, targetClientId, clientIds);
+          const spawn = getDeterministicZombieSpawn(serverId, runRandomSeed, roundNumber, slot, targetClientId, clientIds);
           const targetPlayer = getNearestAliveStickman(spawn, players);
           const targetPosition = targetPlayer?.position ?? getSpawnSlot('arena', targetClientId, clientIds);
           const zombiePosition = getZombiePosition(spawn, targetPosition, now - eventStartedAt, activeObstacleBounds);
@@ -844,7 +996,7 @@ function getRoundSnapshot(
       }
     }
 
-    const targetClientId = getDeterministicTarget(clientIds, serverId, roundNumber, slot);
+    const targetClientId = getDeterministicTarget(clientIds, serverId, runRandomSeed, roundNumber, slot);
     const playerEventActive = now < eventStartedAt + playerEventEffectDuration;
 
     if (playerEventActive && event === 'Someone will get a sword' && targetClientId) {
@@ -912,7 +1064,19 @@ function getSpawnSlot(nextPhase: GamePhase, clientId: string, clientIds: string[
   return spawnSlots[slotIndex];
 }
 
-function PlayerAvatar({ player, position, isLocal, positionUnit = 'px' }: { player: PlayerSnapshot; position: Position; isLocal?: boolean; positionUnit?: 'px' | '%' }) {
+function PlayerAvatar({
+  player,
+  position,
+  isLocal,
+  equippedItem = 'sword',
+  positionUnit = 'px',
+}: {
+  player: PlayerSnapshot;
+  position: Position;
+  isLocal?: boolean;
+  equippedItem?: 'sword' | 'gun';
+  positionUnit?: 'px' | '%';
+}) {
   if (player.phase === 'arena' && player.isDead) return null;
 
   return (
@@ -937,7 +1101,7 @@ function PlayerAvatar({ player, position, isLocal, positionUnit = 'px' }: { play
         <span className="arm right-arm" />
         <span className="leg left-leg" />
         <span className="leg right-leg" />
-        {player.phase === 'arena' && player.hasSword && (
+        {player.phase === 'arena' && player.hasSword && equippedItem === 'sword' && (
           <button
             type="button"
             className={`classic-sword ${player.swordSwinging ? 'swing' : ''}`}
@@ -948,6 +1112,18 @@ function PlayerAvatar({ player, position, isLocal, positionUnit = 'px' }: { play
             <span className="sword-guard" />
             <span className="sword-handle" />
           </button>
+        )}
+        {player.phase === 'arena' && equippedItem === 'gun' && (
+          <span className="classic-gun" aria-hidden="true">
+            <span className="gun-sight" />
+            <span className="gun-barrel" />
+            <span className="gun-muzzle" />
+            <span className="gun-slide" />
+            <span className="gun-body" />
+            <span className="gun-trigger" />
+            <span className="gun-trigger-guard" />
+            <span className="gun-grip" />
+          </span>
         )}
       </div>
     </div>
@@ -982,13 +1158,16 @@ function createInitialBots(now: number): BotSnapshot[] {
   return createBots(initialBotIds, now);
 }
 
-function ZombieAvatar({ zombie, position }: { zombie?: Zombie; position: Position }) {
+function ZombieAvatar({ zombie, position, isTargeted }: { zombie?: Zombie; position: Position; isTargeted?: boolean }) {
   const isKing = zombie?.kind === 'king';
   const health = zombie?.health ?? zombie?.maxHealth;
   const maxHealth = zombie?.maxHealth ?? health;
 
   return (
-    <div className={`zombie ${isKing ? 'zombie-king' : ''} ${zombie?.direction ?? 'front'}`} style={{ left: `${position.x}px`, top: `${position.y}px` }}>
+    <div
+      className={`zombie ${isKing ? 'zombie-king' : ''} ${isTargeted ? 'zombie-targeted' : ''} ${zombie?.direction ?? 'front'}`}
+      style={{ left: `${position.x}px`, top: `${position.y}px` }}
+    >
       {isKing && <div className="zombie-crown">KING</div>}
       {health !== undefined && maxHealth !== undefined && (
         <div className="zombie-health" aria-label="Zombie health">
@@ -1003,8 +1182,10 @@ function ZombieAvatar({ zombie, position }: { zombie?: Zombie; position: Positio
         <span className="leg left-leg" />
         <span className="leg right-leg" />
         {isKing && (
-          <span className={`zombie-sword ${zombie?.swordSwinging ? 'swing' : ''}`}>
-            <span />
+          <span className={`classic-sword zombie-sword ${zombie?.swordSwinging ? 'swing' : ''}`} aria-hidden="true">
+            <span className="sword-blade" />
+            <span className="sword-guard" />
+            <span className="sword-handle" />
           </span>
         )}
       </div>
@@ -1049,11 +1230,17 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
   const [isDead, setIsDead] = useState(false);
   const [roomStartedAt, setRoomStartedAt] = useState(joinedAtRef.current);
   const [roundSeed, setRoundSeed] = useState(0);
+  const [runRandomSeed, setRunRandomSeed] = useState(() => createRunRandomSeed());
   const [spawnPlaced, setSpawnPlaced] = useState(false);
+  const [musicRetryKey, setMusicRetryKey] = useState(0);
+  const [arenaMusicIndex, setArenaMusicIndex] = useState(0);
+  const [targetedZombieId, setTargetedZombieId] = useState<string | null>(null);
   const pressedKeys = useRef(new Set<string>());
   const frameRef = useRef<HTMLDivElement | null>(null);
+  const menuMusicRef = useRef<HTMLAudioElement | null>(null);
   const lobbyMusicRef = useRef<HTMLAudioElement | null>(null);
   const arenaMusicRef = useRef<HTMLAudioElement | null>(null);
+  const arenaSecondMusicRef = useRef<HTMLAudioElement | null>(null);
   const lobbyMusicEnabledRef = useRef(false);
   const swordTimerRef = useRef<number | null>(null);
   const swordSwingStartedAtRef = useRef(0);
@@ -1081,8 +1268,11 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
   const botStuckRef = useRef(new Map<string, { position: Position; ticks: number }>());
   const botDeadAtRef = useRef(new Map<string, number>());
   const botEventImmuneUntilRef = useRef(new Map<string, number>());
+  const playerFrozenUntilRef = useRef(0);
   const stickmanHitAtRef = useRef(new Map<string, number>());
   const destroyedArenaObjectsRef = useRef(new Set<string>());
+  const kingSpawnedAfterBotsRef = useRef(false);
+  const hydratedRunRef = useRef(false);
   const pauseStartedAtRef = useRef(0);
   const invulnerableUntilRef = useRef(0);
   const deathReturnAtRef = useRef(0);
@@ -1143,6 +1333,125 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
   const roomPlayerIdsRef = useRef(roomPlayerIds);
 
   useEffect(() => {
+    const savedRun = readSavedLobbyRun(clientId);
+    hydratedRunRef.current = true;
+    if (!savedRun) return;
+
+    const restoredAt = Date.now();
+    const pauseDuration = savedRun.isPaused ? Math.max(0, restoredAt - savedRun.savedAt) : 0;
+    const restoredRoundEndsAt = shiftFiniteTimestamp(savedRun.roundEndsAt, pauseDuration);
+    const restoredRoomStartedAt = savedRun.roomStartedAt + pauseDuration;
+    const restoredFireHazards = savedRun.fireHazards.map((hazard) => ({
+      ...hazard,
+      startedAt: hazard.startedAt + pauseDuration,
+    }));
+    const restoredDoomsdayStrikes = savedRun.doomsdayStrikes.map((strike) => ({
+      ...strike,
+      startedAt: strike.startedAt + pauseDuration,
+      hitAt: strike.hitAt + pauseDuration,
+    }));
+    const restoredZombies = savedRun.zombies.map((zombie) => ({
+      ...zombie,
+      spawnedAt: zombie.spawnedAt + pauseDuration,
+    }));
+    const restoredZombieKing = savedRun.zombieKing
+      ? {
+          ...savedRun.zombieKing,
+          spawnedAt: savedRun.zombieKing.spawnedAt + pauseDuration,
+        }
+      : null;
+    const restoredKingZombies = savedRun.kingZombies.map((zombie) => ({
+      ...zombie,
+      spawnedAt: zombie.spawnedAt + pauseDuration,
+    }));
+    const restoredDuelState = savedRun.duelState
+      ? {
+          ...savedRun.duelState,
+          startedAt: savedRun.duelState.startedAt + pauseDuration,
+        }
+      : null;
+    const restoredDeathReturnAt = shiftActiveTimestamp(savedRun.deathReturnAt, pauseDuration);
+    const restoredInvulnerableUntil = shiftActiveTimestamp(savedRun.invulnerableUntil, pauseDuration);
+    const restoredNextZombieKingSpawnAt = shiftActiveTimestamp(savedRun.nextZombieKingSpawnAt, pauseDuration);
+    const restoredBotDeadAt = savedRun.botDeadAt.map(([botId, deadAt]) => [botId, deadAt + pauseDuration] as [string, number]);
+    const restoredBotEventImmuneUntil = savedRun.botEventImmuneUntil.map(([botId, immuneUntil]) => [botId, immuneUntil + pauseDuration] as [string, number]);
+    const restoredPlayerPositionHistory = savedRun.playerPositionHistory.map((entry) => ({
+      ...entry,
+      recordedAt: entry.recordedAt + pauseDuration,
+    }));
+
+    lobbyMusicEnabledRef.current = !savedRun.menuOpen;
+    joinedAtRef.current = savedRun.joinedAt;
+    setPhase(savedRun.phase);
+    setMenuOpen(savedRun.menuOpen);
+    setMenuPanel(savedRun.menuPanel);
+    setIsPaused(savedRun.isPaused);
+    setTimeLeft(savedRun.timeLeft);
+    setRoundEndsAt(restoredRoundEndsAt);
+    setRoomStartedAt(restoredRoomStartedAt);
+    setRoundSeed(savedRun.roundSeed);
+    setRunRandomSeed(savedRun.runRandomSeed ?? createRunRandomSeed());
+    setSpawnPlaced(savedRun.spawnPlaced);
+    setPosition(savedRun.position);
+    setDirection(savedRun.direction);
+    setShopOpen(savedRun.shopOpen);
+    setShopDismissed(savedRun.shopDismissed);
+    setSwordSwinging(savedRun.swordSwinging);
+    setServerAnnouncement(savedRun.serverAnnouncement);
+    setHasSword(savedRun.hasSword);
+    setIsRapid(savedRun.isRapid);
+    setMissingRightLeg(savedRun.missingRightLeg);
+    setIsBlue(savedRun.isBlue);
+    setIsRed(savedRun.isRed);
+    setIsGreen(savedRun.isGreen);
+    setIsFrozen(savedRun.isFrozen);
+    setHiddenArenaObjects(savedRun.hiddenArenaObjects);
+    setFireHazards(restoredFireHazards);
+    setDoomsdayStrikes(restoredDoomsdayStrikes);
+    setZombies(restoredZombies);
+    setZombieKing(restoredZombieKing);
+    setKingZombies(restoredKingZombies);
+    setEquippedItem(savedRun.equippedItem);
+    setBots(savedRun.bots);
+    setArenaMode(savedRun.arenaMode);
+    setDuelState(restoredDuelState);
+    setDeathMessage(savedRun.deathMessage);
+    setHealth(savedRun.health);
+    setIsDead(savedRun.isDead);
+
+    positionRef.current = savedRun.position;
+    botsRef.current = savedRun.bots;
+    isDeadRef.current = savedRun.isDead;
+    swordSwingStartedAtRef.current = savedRun.swordSwingStartedAt;
+    destroyedArenaObjectsRef.current = new Set(savedRun.destroyedArenaObjects);
+    zombieKingRef.current = restoredZombieKing;
+    kingZombiesRef.current = restoredKingZombies;
+    nextZombieKingSpawnAtRef.current = restoredNextZombieKingSpawnAt;
+    kingSpawnedAfterBotsRef.current = savedRun.kingSpawnedAfterBots;
+    deathReturnAtRef.current = restoredDeathReturnAt;
+    invulnerableUntilRef.current = restoredInvulnerableUntil;
+    playerFrozenUntilRef.current = savedRun.isFrozen ? restoredAt + freezeDuration : 0;
+    pauseStartedAtRef.current = savedRun.isPaused ? restoredAt : 0;
+    killedZombieIdsRef.current = new Set(savedRun.killedZombieIds);
+    damagedZombieIdsRef.current = new Set(savedRun.damagedZombieIds);
+    damagedFireIdsRef.current = new Set(savedRun.damagedFireIds);
+    damagedDoomsdayIdsRef.current = new Set(savedRun.damagedDoomsdayIds);
+    handledEventIdsRef.current = new Set(savedRun.handledEventIds);
+    damagedBotSwingIdsRef.current = new Set(savedRun.damagedBotSwingIds);
+    damagedBotFireIdsRef.current = new Set(savedRun.damagedBotFireIds);
+    damagedBotDoomsdayIdsRef.current = new Set(savedRun.damagedBotDoomsdayIds);
+    botDeadAtRef.current = new Map(restoredBotDeadAt);
+    botEventImmuneUntilRef.current = new Map(restoredBotEventImmuneUntil);
+    playerPositionHistoryRef.current = restoredPlayerPositionHistory;
+    gameStateRef.current = {
+      phase: savedRun.phase,
+      roundEndsAt: restoredRoundEndsAt,
+      hiddenArenaObjects: savedRun.hiddenArenaObjects,
+      serverAnnouncement: savedRun.serverAnnouncement,
+    };
+  }, [clientId]);
+
+  useEffect(() => {
     playerSnapshotRef.current = playerSnapshot;
   }, [playerSnapshot]);
 
@@ -1170,6 +1479,14 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
   }, [kingZombies, zombieKing]);
 
   useEffect(() => {
+    if (gameStopped || phase !== 'arena' || arenaMode !== 'main') return;
+    if (kingSpawnedAfterBotsRef.current || bots.length === 0 || !bots.every((bot) => bot.isDead)) return;
+
+    kingSpawnedAfterBotsRef.current = true;
+    spawnZombieKing();
+  }, [arenaMode, bots, gameStopped, phase]);
+
+  useEffect(() => {
     isDeadRef.current = isDead;
   }, [isDead]);
 
@@ -1195,6 +1512,109 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
       serverAnnouncement,
     };
   }, [hiddenArenaObjects, phase, roundEndsAt, serverAnnouncement]);
+
+  useEffect(() => {
+    if (!hydratedRunRef.current || menuOpen) return;
+
+    const savedRun: SavedLobbyRunV1 = {
+      version: savedRunVersion,
+      savedAt: Date.now(),
+      joinedAt: joinedAtRef.current,
+      phase,
+      menuOpen,
+      menuPanel,
+      isPaused,
+      timeLeft,
+      roundEndsAt,
+      roomStartedAt,
+      roundSeed,
+      runRandomSeed,
+      spawnPlaced,
+      position,
+      direction,
+      shopOpen,
+      shopDismissed,
+      swordSwinging,
+      swordSwingStartedAt: swordSwingStartedAtRef.current,
+      serverAnnouncement,
+      hasSword,
+      isRapid,
+      missingRightLeg,
+      isBlue,
+      isRed,
+      isGreen,
+      isFrozen,
+      hiddenArenaObjects,
+      destroyedArenaObjects: Array.from(destroyedArenaObjectsRef.current),
+      fireHazards,
+      doomsdayStrikes,
+      zombies,
+      zombieKing,
+      kingZombies,
+      equippedItem,
+      bots,
+      arenaMode,
+      duelState,
+      deathMessage,
+      health,
+      isDead,
+      deathReturnAt: deathReturnAtRef.current,
+      invulnerableUntil: invulnerableUntilRef.current,
+      nextZombieKingSpawnAt: nextZombieKingSpawnAtRef.current,
+      kingSpawnedAfterBots: kingSpawnedAfterBotsRef.current,
+      killedZombieIds: Array.from(killedZombieIdsRef.current),
+      damagedZombieIds: Array.from(damagedZombieIdsRef.current),
+      damagedFireIds: Array.from(damagedFireIdsRef.current),
+      damagedDoomsdayIds: Array.from(damagedDoomsdayIdsRef.current),
+      handledEventIds: Array.from(handledEventIdsRef.current),
+      damagedBotSwingIds: Array.from(damagedBotSwingIdsRef.current),
+      damagedBotFireIds: Array.from(damagedBotFireIdsRef.current),
+      damagedBotDoomsdayIds: Array.from(damagedBotDoomsdayIdsRef.current),
+      botDeadAt: Array.from(botDeadAtRef.current.entries()),
+      botEventImmuneUntil: Array.from(botEventImmuneUntilRef.current.entries()),
+      playerPositionHistory: playerPositionHistoryRef.current,
+    };
+
+    writeSavedLobbyRun(clientId, savedRun);
+  }, [
+    arenaMode,
+    bots,
+    clientId,
+    deathMessage,
+    direction,
+    doomsdayStrikes,
+    duelState,
+    equippedItem,
+    fireHazards,
+    hasSword,
+    health,
+    hiddenArenaObjects,
+    isBlue,
+    isDead,
+    isFrozen,
+    isGreen,
+    isPaused,
+    isRapid,
+    isRed,
+    kingZombies,
+    menuOpen,
+    menuPanel,
+    missingRightLeg,
+    phase,
+    position,
+    roomStartedAt,
+    roundEndsAt,
+    roundSeed,
+    runRandomSeed,
+    serverAnnouncement,
+    shopDismissed,
+    shopOpen,
+    spawnPlaced,
+    swordSwinging,
+    timeLeft,
+    zombieKing,
+    zombies,
+  ]);
 
   function applyRoundSnapshot(nextSnapshot: RoundSnapshot) {
     const phaseChanged = gameStateRef.current.phase !== nextSnapshot.phase;
@@ -1239,6 +1659,8 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
       pauseStartedAtRef.current = 0;
       deathReturnAtRef.current = 0;
       nextZombieKingSpawnAtRef.current = 0;
+      kingSpawnedAfterBotsRef.current = false;
+      playerFrozenUntilRef.current = 0;
       setArenaMode('main');
       setDuelState(null);
       setBots(nextSnapshot.phase === 'arena' ? createInitialBots(Date.now()) : []);
@@ -1259,8 +1681,10 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
       destroyedArenaObjectsRef.current.clear();
       kingZombiesRef.current = [];
       zombieKingRef.current = null;
+      kingSpawnedAfterBotsRef.current = false;
       stickmanHitAtRef.current.clear();
       invulnerableUntilRef.current = 0;
+      playerFrozenUntilRef.current = 0;
     }
 
     setPhase(nextSnapshot.phase);
@@ -1273,12 +1697,36 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     setServerAnnouncement(nextSnapshot.serverAnnouncement);
     const playerIsDuelFighter = Boolean(duelState?.fighters.includes(clientId));
     setHasSword((current) => !enteringLobby && !isDead && (current || nextSnapshot.targetedEffects.sword.includes(clientId) || playerIsDuelFighter));
-    setIsRapid(!enteringLobby && !isDead && nextSnapshot.targetedEffects.rapid.includes(clientId));
-    setMissingRightLeg(!enteringLobby && !isDead && nextSnapshot.targetedEffects.missingRightLeg.includes(clientId));
-    setIsBlue(!enteringLobby && !isDead && nextSnapshot.targetedEffects.blue.includes(clientId));
-    setIsRed(!enteringLobby && !isDead && nextSnapshot.targetedEffects.red.includes(clientId));
-    setIsGreen(!enteringLobby && !isDead && nextSnapshot.targetedEffects.green.includes(clientId));
-    setIsFrozen(!enteringLobby && !isDead && nextSnapshot.targetedEffects.frozen.includes(clientId));
+    setIsRapid((current) => !enteringLobby && !isDead && (current || nextSnapshot.targetedEffects.rapid.includes(clientId)));
+    setMissingRightLeg((current) => !enteringLobby && !isDead && (current || nextSnapshot.targetedEffects.missingRightLeg.includes(clientId)));
+    setIsBlue((current) => {
+      if (enteringLobby || isDead) return false;
+      if (nextSnapshot.targetedEffects.blue.includes(clientId)) return true;
+      if (nextSnapshot.targetedEffects.red.includes(clientId) || nextSnapshot.targetedEffects.green.includes(clientId)) return false;
+      return current;
+    });
+    setIsRed((current) => {
+      if (enteringLobby || isDead) return false;
+      if (nextSnapshot.targetedEffects.red.includes(clientId)) return true;
+      if (nextSnapshot.targetedEffects.blue.includes(clientId) || nextSnapshot.targetedEffects.green.includes(clientId)) return false;
+      return current;
+    });
+    setIsGreen((current) => {
+      if (enteringLobby || isDead) return false;
+      if (nextSnapshot.targetedEffects.green.includes(clientId)) return true;
+      if (nextSnapshot.targetedEffects.blue.includes(clientId) || nextSnapshot.targetedEffects.red.includes(clientId)) return false;
+      return current;
+    });
+    if (enteringLobby || isDead) {
+      playerFrozenUntilRef.current = 0;
+      setIsFrozen(false);
+    } else if (nextSnapshot.targetedEffects.frozen.includes(clientId)) {
+      playerFrozenUntilRef.current = Math.max(playerFrozenUntilRef.current, Date.now() + freezeDuration);
+      setIsFrozen(true);
+    } else if (playerFrozenUntilRef.current > 0 && Date.now() >= playerFrozenUntilRef.current) {
+      playerFrozenUntilRef.current = 0;
+      setIsFrozen(false);
+    }
 
     setBots((currentBots) =>
       currentBots.map((bot) => {
@@ -1325,9 +1773,18 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     });
   }
 
+  function clearBotMovementState(botId: string) {
+    botDeadAtRef.current.delete(botId);
+    botEventImmuneUntilRef.current.delete(botId);
+    clearBotFleeStarts(botFleeStartsRef.current, botId);
+    botWanderTargetsRef.current.delete(botId);
+    botLastAnglesRef.current.delete(botId);
+    botStuckRef.current.delete(botId);
+  }
+
   function damageBot(botId: string, amount: number) {
-    setBots((currentBots) =>
-      currentBots.map((bot) => {
+    setBots((currentBots) => {
+      const nextBots = currentBots.map((bot) => {
         if (bot.clientId !== botId || bot.isDead) return bot;
         const nextHealth = Math.max(0, bot.health - amount);
         const nextIsDead = nextHealth <= 0;
@@ -1338,7 +1795,6 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
           botWanderTargetsRef.current.delete(bot.clientId);
           botLastAnglesRef.current.delete(bot.clientId);
           botStuckRef.current.delete(bot.clientId);
-          spawnZombieKing();
         }
 
         return {
@@ -1354,8 +1810,10 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
           missingRightLeg: nextIsDead ? false : bot.missingRightLeg,
           swordSwinging: nextIsDead ? false : bot.swordSwinging,
         };
-      }),
-    );
+      });
+
+      return nextBots;
+    });
   }
 
   function damageKingZombie(zombieId: string, amount: number) {
@@ -1369,20 +1827,60 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     );
   }
 
-  function damageZombieKing(amount: number) {
-    setZombieKing((currentKing) => {
-      if (!currentKing || killedZombieIdsRef.current.has(currentKing.id)) return currentKing;
-      const nextHealth = Math.max(0, (currentKing.health ?? zombieKingMaxHealth) - amount);
-      if (nextHealth <= 0) {
-        killedZombieIdsRef.current.add(currentKing.id);
-        clearKingZombies();
-        zombieKingRef.current = null;
-        nextZombieKingSpawnAtRef.current = 0;
-        setEquippedItem('sword');
-        return null;
-      }
-      return { ...currentKing, health: nextHealth, swordSwinging: nextHealth > 0 && currentKing.swordSwinging };
+  function respawnDeadBotsAfterKingDeath(now = Date.now()) {
+    const currentBots = botsRef.current;
+    if (!currentBots.some((bot) => bot.isDead)) return;
+
+    const currentPlayerIds = [clientId, ...currentBots.map((bot) => bot.clientId)];
+    const nextBots = currentBots.map((bot) => {
+      if (!bot.isDead) return bot;
+
+      clearBotMovementState(bot.clientId);
+
+      return {
+        ...bot,
+        position: getSpawnSlot('arena', bot.clientId, currentPlayerIds),
+        direction: 'front' as Direction,
+        phase: 'arena' as GamePhase,
+        hasSword: false,
+        isRapid: false,
+        isBlue: false,
+        isRed: false,
+        isGreen: false,
+        isFrozen: false,
+        missingRightLeg: false,
+        swordSwinging: false,
+        health: botMaxHealth,
+        isDead: false,
+        updatedAt: now,
+      };
     });
+
+    botsRef.current = nextBots;
+    setBots(nextBots);
+    shiftPausedDeadlines(botRespawnEventPauseDuration);
+    setRoomStartedAt((current) => current + botRespawnEventPauseDuration);
+  }
+
+  function damageZombieKing(amount: number) {
+    const currentKing = zombieKingRef.current;
+    if (!currentKing || killedZombieIdsRef.current.has(currentKing.id)) return;
+
+    const nextHealth = Math.max(0, (currentKing.health ?? zombieKingMaxHealth) - amount);
+    if (nextHealth <= 0) {
+      killedZombieIdsRef.current.add(currentKing.id);
+      clearKingZombies();
+      zombieKingRef.current = null;
+      nextZombieKingSpawnAtRef.current = 0;
+      setZombieKing(null);
+      setEquippedItem('sword');
+      respawnDeadBotsAfterKingDeath();
+      return;
+    }
+
+    const nextKing = { ...currentKing, health: nextHealth, swordSwinging: currentKing.swordSwinging };
+    zombieKingRef.current = nextKing;
+    setZombieKing(nextKing);
   }
 
   function getStickmanById(stickmanId: string, nextBots = botsRef.current) {
@@ -1408,6 +1906,71 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
   function clearKingZombies() {
     kingZombiesRef.current = [];
     setKingZombies([]);
+  }
+
+  function clearArenaCombatState() {
+    pressedKeys.current.clear();
+    setSwordSwinging(false);
+    setServerAnnouncement('');
+    setHasSword(false);
+    setIsRapid(false);
+    setMissingRightLeg(false);
+    setIsBlue(false);
+    setIsRed(false);
+    setIsGreen(false);
+    setIsFrozen(false);
+    setHiddenArenaObjects([]);
+    setFireHazards([]);
+    setDoomsdayStrikes([]);
+    setZombies([]);
+    setZombieKing(null);
+    setKingZombies([]);
+    setEquippedItem('sword');
+    setBots([]);
+    setArenaMode('main');
+    setDuelState(null);
+    setDeathMessage('');
+    setHealth(100);
+    setIsDead(false);
+    setShopOpen(false);
+    setShopDismissed(false);
+
+    damagedFireIdsRef.current.clear();
+    damagedDoomsdayIdsRef.current.clear();
+    killedZombieIdsRef.current.clear();
+    damagedZombieIdsRef.current.clear();
+    handledEventIdsRef.current.clear();
+    damagedBotSwingIdsRef.current.clear();
+    damagedBotFireIdsRef.current.clear();
+    damagedBotDoomsdayIdsRef.current.clear();
+    botFleeStartsRef.current.clear();
+    botWanderTargetsRef.current.clear();
+    botLastAnglesRef.current.clear();
+    botStuckRef.current.clear();
+    botDeadAtRef.current.clear();
+    botEventImmuneUntilRef.current.clear();
+    destroyedArenaObjectsRef.current.clear();
+    kingZombiesRef.current = [];
+    zombieKingRef.current = null;
+    nextZombieKingSpawnAtRef.current = 0;
+    kingSpawnedAfterBotsRef.current = false;
+    stickmanHitAtRef.current.clear();
+    invulnerableUntilRef.current = 0;
+    deathReturnAtRef.current = 0;
+    playerFrozenUntilRef.current = 0;
+    playerPositionHistoryRef.current = [];
+    zombiePositionCacheRef.current.clear();
+  }
+
+  function clearBattleToDeathArenaEffects() {
+    setHiddenArenaObjects([]);
+    setFireHazards([]);
+    setDoomsdayStrikes([]);
+    destroyedArenaObjectsRef.current.clear();
+    damagedFireIdsRef.current.clear();
+    damagedDoomsdayIdsRef.current.clear();
+    damagedBotFireIdsRef.current.clear();
+    damagedBotDoomsdayIdsRef.current.clear();
   }
 
   function spawnZombieKing(now = Date.now()) {
@@ -1444,6 +2007,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     handledEventIdsRef.current.add(eventId);
     const opponentIndex = hashText(`${eventId}:opponent`) % opponents.length;
     const fighters: [string, string] = [clientId, opponents[opponentIndex].clientId];
+    clearBattleToDeathArenaEffects();
     setArenaMode('duel');
     setDuelState({ id: eventId, fighters, startedAt: Date.now() });
 
@@ -1539,14 +2103,72 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     }));
   }
 
+  function prepareAudio(audio: HTMLAudioElement | null) {
+    if (!audio) return;
+    audio.preload = 'auto';
+    if (audio.readyState === 0) audio.load();
+  }
+
+  function playMusicTrack(audio: HTMLAudioElement | null, loop: boolean) {
+    if (!audio) return;
+    prepareAudio(audio);
+    audio.volume = 0.45;
+    audio.loop = loop;
+    if (!audio.paused) return;
+    void audio.play().catch(() => undefined);
+  }
+
+  function stopMusicTrack(audio: HTMLAudioElement | null, reset = true) {
+    if (!audio) return;
+    audio.pause();
+    if (reset) audio.currentTime = 0;
+  }
+
+  function playCurrentMusic(nextMenuOpen = menuOpen, nextPhase = phase, nextGameStopped = gameStopped) {
+    const activeArenaAudio = arenaMusicIndex === 0 ? arenaMusicRef.current : arenaSecondMusicRef.current;
+    const inactiveArenaAudio = arenaMusicIndex === 0 ? arenaSecondMusicRef.current : arenaMusicRef.current;
+
+    if (nextMenuOpen) {
+      stopMusicTrack(lobbyMusicRef.current, false);
+      stopMusicTrack(arenaMusicRef.current);
+      stopMusicTrack(arenaSecondMusicRef.current);
+      playMusicTrack(menuMusicRef.current, true);
+      return;
+    }
+
+    stopMusicTrack(menuMusicRef.current);
+
+    if (nextGameStopped || !lobbyMusicEnabledRef.current) {
+      stopMusicTrack(lobbyMusicRef.current, false);
+      stopMusicTrack(arenaMusicRef.current, false);
+      stopMusicTrack(arenaSecondMusicRef.current, false);
+      return;
+    }
+
+    if (nextPhase === 'lobby') {
+      setArenaMusicIndex(0);
+      stopMusicTrack(arenaMusicRef.current);
+      stopMusicTrack(arenaSecondMusicRef.current);
+      playMusicTrack(lobbyMusicRef.current, true);
+      return;
+    }
+
+    stopMusicTrack(lobbyMusicRef.current);
+    stopMusicTrack(inactiveArenaAudio);
+    playMusicTrack(activeArenaAudio, false);
+  }
+
   function startFromMenu() {
     const now = Date.now();
+    clearSavedLobbyRun(clientId);
+    setRunRandomSeed(createRunRandomSeed());
     pressedKeys.current.clear();
     setShopOpen(false);
     setShopDismissed(false);
     lobbyMusicEnabledRef.current = true;
     setIsPaused(false);
     pauseStartedAtRef.current = 0;
+    playCurrentMusic(false, 'lobby', false);
     setMenuOpen(false);
     setMenuPanel('main');
     setRoomStartedAt(now);
@@ -1554,9 +2176,38 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     setRoundSeed((current) => current + 1);
   }
 
+  function leaveArenaToLobby() {
+    const now = Date.now();
+    if (swordTimerRef.current) window.clearTimeout(swordTimerRef.current);
+    clearArenaCombatState();
+    lobbyMusicEnabledRef.current = true;
+    playCurrentMusic(false, 'lobby', false);
+    setPhase('lobby');
+    setMenuOpen(false);
+    setMenuPanel('main');
+    setIsPaused(false);
+    setTimeLeft(lobbyDuration);
+    setRoundEndsAt(now + lobbyDuration * 1000);
+    setRoomStartedAt(now);
+    setRunRandomSeed(createRunRandomSeed());
+    setRoundSeed((current) => current + 1);
+    setSpawnPlaced(true);
+    setPosition(getSpawnPosition('lobby', clientId, roomPlayerIdsRef.current));
+    setDirection('front');
+    pauseStartedAtRef.current = 0;
+    gameStateRef.current = {
+      phase: 'lobby',
+      roundEndsAt: now + lobbyDuration * 1000,
+      hiddenArenaObjects: [],
+      serverAnnouncement: '',
+    };
+  }
+
   function shiftPausedDeadlines(pauseDuration: number) {
-    if (deathReturnAtRef.current > 0) deathReturnAtRef.current += pauseDuration;
-    if (invulnerableUntilRef.current > 0) invulnerableUntilRef.current += pauseDuration;
+    deathReturnAtRef.current = shiftActiveTimestamp(deathReturnAtRef.current, pauseDuration);
+    invulnerableUntilRef.current = shiftActiveTimestamp(invulnerableUntilRef.current, pauseDuration);
+    nextZombieKingSpawnAtRef.current = shiftActiveTimestamp(nextZombieKingSpawnAtRef.current, pauseDuration);
+    playerFrozenUntilRef.current = shiftActiveTimestamp(playerFrozenUntilRef.current, pauseDuration);
 
     botDeadAtRef.current.forEach((deadAt, botId) => {
       botDeadAtRef.current.set(botId, deadAt + pauseDuration);
@@ -1568,6 +2219,48 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
       ...entry,
       recordedAt: entry.recordedAt + pauseDuration,
     }));
+    setRoundEndsAt((current) => shiftFiniteTimestamp(current, pauseDuration));
+    setFireHazards((current) =>
+      current.map((hazard) => ({
+        ...hazard,
+        startedAt: hazard.startedAt + pauseDuration,
+      })),
+    );
+    setDoomsdayStrikes((current) =>
+      current.map((strike) => ({
+        ...strike,
+        startedAt: strike.startedAt + pauseDuration,
+        hitAt: strike.hitAt + pauseDuration,
+      })),
+    );
+    setZombies((current) =>
+      current.map((zombie) => ({
+        ...zombie,
+        spawnedAt: zombie.spawnedAt + pauseDuration,
+      })),
+    );
+    setZombieKing((current) =>
+      current
+        ? {
+            ...current,
+            spawnedAt: current.spawnedAt + pauseDuration,
+          }
+        : null,
+    );
+    setKingZombies((current) =>
+      current.map((zombie) => ({
+        ...zombie,
+        spawnedAt: zombie.spawnedAt + pauseDuration,
+      })),
+    );
+    setDuelState((current) =>
+      current
+        ? {
+            ...current,
+            startedAt: current.startedAt + pauseDuration,
+          }
+        : null,
+    );
   }
 
   function togglePause() {
@@ -1584,6 +2277,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     pauseStartedAtRef.current = 0;
     shiftPausedDeadlines(pauseDuration);
     setRoomStartedAt((current) => current + pauseDuration);
+    playCurrentMusic(false, phase, false);
     setIsPaused(false);
   }
 
@@ -1603,7 +2297,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
         return;
       }
 
-      const snapshot = getRoundSnapshot(`local-game-${roundSeed}`, roomStartedAt, now, getRoomPlayerSnapshots(), playerPositionHistoryRef.current, arenaMode === 'duel');
+      const snapshot = getRoundSnapshot(`local-game-${roundSeed}`, runRandomSeed, roomStartedAt, now, getRoomPlayerSnapshots(), playerPositionHistoryRef.current, arenaMode === 'duel');
 
       if (snapshot.phase === 'lobby') {
         applyRoundSnapshot(snapshot);
@@ -1619,40 +2313,38 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     }, 250);
 
     return () => window.clearInterval(timer);
-  }, [arenaMode, gameStopped, phase, roomStartedAt, roundSeed]);
+  }, [arenaMode, gameStopped, phase, roomStartedAt, roundSeed, runRandomSeed]);
 
   useEffect(() => {
-    const lobbyAudio = lobbyMusicRef.current;
-    const arenaAudio = arenaMusicRef.current;
-    if (!lobbyAudio || !arenaAudio) return;
+    if (!menuOpen && !lobbyMusicEnabledRef.current) return;
 
-    if (phase === 'lobby' && !gameStopped && lobbyMusicEnabledRef.current) {
-      arenaAudio.pause();
-      arenaAudio.currentTime = 0;
-      lobbyAudio.volume = 0.45;
-      lobbyAudio.loop = true;
-      void lobbyAudio.play().catch(() => {
-        lobbyMusicEnabledRef.current = false;
-      });
-      return;
+    function retryMusic() {
+      const activeAudio =
+        menuOpen ? menuMusicRef.current : phase === 'lobby' ? lobbyMusicRef.current : arenaMusicIndex === 0 ? arenaMusicRef.current : arenaSecondMusicRef.current;
+      if (activeAudio?.paused) {
+        setMusicRetryKey((current) => current + 1);
+      }
     }
 
-    if (phase === 'arena' && !gameStopped && lobbyMusicEnabledRef.current) {
-      lobbyAudio.pause();
-      lobbyAudio.currentTime = 0;
-      arenaAudio.volume = 0.45;
-      arenaAudio.loop = true;
-      void arenaAudio.play().catch(() => {
-        lobbyMusicEnabledRef.current = false;
-      });
-      return;
-    }
+    window.addEventListener('pointerdown', retryMusic);
+    window.addEventListener('keydown', retryMusic);
 
-    lobbyAudio.pause();
-    lobbyAudio.currentTime = 0;
-    arenaAudio.pause();
-    arenaAudio.currentTime = 0;
-  }, [gameStopped, phase]);
+    return () => {
+      window.removeEventListener('pointerdown', retryMusic);
+      window.removeEventListener('keydown', retryMusic);
+    };
+  }, [arenaMusicIndex, menuOpen, phase]);
+
+  useEffect(() => {
+    prepareAudio(menuMusicRef.current);
+    prepareAudio(lobbyMusicRef.current);
+    prepareAudio(arenaMusicRef.current);
+    prepareAudio(arenaSecondMusicRef.current);
+  }, [menuOpen]);
+
+  useEffect(() => {
+    playCurrentMusic();
+  }, [arenaMusicIndex, gameStopped, menuOpen, musicRetryKey, phase]);
 
   useEffect(() => {
     if (gameStopped || phase !== 'arena') return;
@@ -1798,23 +2490,30 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
             } else {
               const segmentAngle = avoidReverseAngle(sideEscapeAngle, botLastAnglesRef.current.get(bot.clientId), `${bot.clientId}:${now}:side`);
               botLastAnglesRef.current.set(bot.clientId, segmentAngle);
-              targetPosition = getDirectionalSegmentTarget(bot.position, segmentAngle, botSideEscapeDistance);
+              targetPosition = getOpenDirectionalSegmentTarget(bot.position, segmentAngle, obstacleBounds, `${bot.clientId}:${now}:side`, botSideEscapeDistance);
               botWanderTargetsRef.current.set(bot.clientId, targetPosition);
             }
           } else if (nearestZombie && zombieDistance < botZombieFleeDistance) {
-            clearBotFleeStarts(botFleeStartsRef.current, bot.clientId);
+            const fleeKey = `${bot.clientId}:${nearestZombie.id}`;
+            const currentFleeKey = [...botFleeStartsRef.current.keys()].find((key) => key.startsWith(`${bot.clientId}:`) && key !== fleeKey);
+            if (currentFleeKey) {
+              botFleeStartsRef.current.delete(currentFleeKey);
+              botWanderTargetsRef.current.delete(bot.clientId);
+            }
+
             movementSpeed = speed * botFleeSpeedMultiplier;
             const currentSegment = botWanderTargetsRef.current.get(bot.clientId);
             if (currentSegment && Math.hypot(currentSegment.x - bot.position.x, currentSegment.y - bot.position.y) >= 18) {
               targetPosition = currentSegment;
             } else {
+              botFleeStartsRef.current.set(fleeKey, bot.position);
               const segmentAngle = avoidReverseAngle(
                 Math.atan2(bot.position.y - nearestZombie.position.y, bot.position.x - nearestZombie.position.x),
                 botLastAnglesRef.current.get(bot.clientId),
                 `${bot.clientId}:${now}:zombie`,
               );
               botLastAnglesRef.current.set(bot.clientId, segmentAngle);
-              targetPosition = getDirectionalSegmentTarget(bot.position, segmentAngle);
+              targetPosition = getOpenDirectionalSegmentTarget(bot.position, segmentAngle, obstacleBounds, `${bot.clientId}:${now}:zombie`);
               botWanderTargetsRef.current.set(bot.clientId, targetPosition);
             }
           } else if (nearestSwordThreat && threatDistance < botFleeDistance) {
@@ -1837,7 +2536,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
                 `${bot.clientId}:${now}:sword`,
               );
               botLastAnglesRef.current.set(bot.clientId, segmentAngle);
-              targetPosition = getDirectionalSegmentTarget(bot.position, segmentAngle);
+              targetPosition = getOpenDirectionalSegmentTarget(bot.position, segmentAngle, obstacleBounds, `${bot.clientId}:${now}:sword`);
               botWanderTargetsRef.current.set(bot.clientId, targetPosition);
             }
           } else if (bot.hasSword && nearestTarget) {
@@ -1859,7 +2558,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
                 `${bot.clientId}:${now}:wander`,
               );
               botLastAnglesRef.current.set(bot.clientId, wanderAngle);
-              const nextWanderTarget = getDirectionalSegmentTarget(bot.position, wanderAngle);
+              const nextWanderTarget = getOpenDirectionalSegmentTarget(bot.position, wanderAngle, obstacleBounds, `${bot.clientId}:${now}:wander`);
 
               botWanderTargetsRef.current.set(bot.clientId, nextWanderTarget);
               targetPosition = nextWanderTarget;
@@ -1878,9 +2577,12 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
           const isStuck = stuckTicks >= 3;
 
           if (isStuck) {
-            botWanderTargetsRef.current.delete(bot.clientId);
-            botLastAnglesRef.current.delete(bot.clientId);
+            const escapeAngle = avoidReverseAngle(Math.atan2(bot.position.y - targetPosition.y, bot.position.x - targetPosition.x), botLastAnglesRef.current.get(bot.clientId), `${bot.clientId}:${now}:stuck`);
+            const escapeTarget = getOpenDirectionalSegmentTarget(bot.position, escapeAngle, obstacleBounds, `${bot.clientId}:${now}:stuck`, botSideEscapeDistance);
+            botWanderTargetsRef.current.set(bot.clientId, escapeTarget);
+            botLastAnglesRef.current.set(bot.clientId, escapeAngle);
             botStuckRef.current.delete(bot.clientId);
+            targetPosition = escapeTarget;
           } else {
             botStuckRef.current.set(bot.clientId, { position: finalPosition, ticks: stuckTicks });
           }
@@ -2120,6 +2822,12 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
   useEffect(() => {
     if (isFrozen) pressedKeys.current.clear();
   }, [isFrozen]);
+
+  useEffect(() => {
+    if (phase !== 'arena' || equippedItem !== 'gun' || !isZombieKingAlive(zombieKing)) {
+      setTargetedZombieId(null);
+    }
+  }, [equippedItem, phase, zombieKing]);
 
   useEffect(() => {
     if (gameStopped) return;
@@ -2456,22 +3164,39 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     });
   }
 
-  function shootGunAt(screenPosition: Position) {
+  function getGunTargetAtWorld(targetPosition: Position) {
     const kingAlive = isZombieKingAlive(zombieKing);
-    if (gameStopped || phase !== 'arena' || equippedItem !== 'gun' || !kingAlive || !zombieKing || isDead) return;
+    if (phase !== 'arena' || equippedItem !== 'gun' || !kingAlive || !zombieKing || isDead) return undefined;
 
-    const targetPosition = screenToWorld(screenPosition);
     const shootableZombies = [
       ...kingZombies.filter((zombie) => !killedZombieIdsRef.current.has(zombie.id) && (zombie.health ?? 0) > 0),
       zombieKing,
     ];
-    const hitZombie = shootableZombies
+
+    return shootableZombies
       .map((zombie) => ({
         zombie,
         distance: Math.hypot(zombie.position.x - targetPosition.x, zombie.position.y - targetPosition.y),
       }))
       .filter(({ zombie, distance }) => distance <= (zombie.kind === 'king' ? 86 : 58))
       .sort((a, b) => a.distance - b.distance)[0]?.zombie;
+  }
+
+  function updateGunTarget(screenPosition: Position) {
+    if (gameStopped) {
+      setTargetedZombieId(null);
+      return;
+    }
+
+    const hitZombie = getGunTargetAtWorld(screenToWorld(screenPosition));
+    setTargetedZombieId(hitZombie?.id ?? null);
+  }
+
+  function shootGunAt(screenPosition: Position) {
+    const kingAlive = isZombieKingAlive(zombieKing);
+    if (gameStopped || phase !== 'arena' || equippedItem !== 'gun' || !kingAlive || !zombieKing || isDead) return;
+
+    const hitZombie = getGunTargetAtWorld(screenToWorld(screenPosition));
 
     if (!hitZombie) return;
 
@@ -2482,45 +3207,66 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
     }
   }
 
+  const activeFireObjectIds = new Set(fireHazards.map((hazard) => hazard.objectId).filter(Boolean));
+  const destroyedObjectMarkers =
+    phase === 'arena' && arenaMode === 'main'
+      ? hiddenArenaObjects
+          .filter((objectId) => !activeFireObjectIds.has(objectId))
+          .map((objectId) => {
+            const bounds = getBaseObjectBounds(objectId);
+            return bounds ? { objectId, bounds: scaleBoundsToScreen(bounds) } : null;
+          })
+          .filter((marker): marker is { objectId: string; bounds: Bounds } => Boolean(marker))
+      : [];
+  const audioDeck = (
+    <>
+      <audio ref={menuMusicRef} src={menuMusicSrc} preload="auto" />
+      <audio ref={lobbyMusicRef} src={lobbyMusicSrc} preload="auto" />
+      <audio ref={arenaMusicRef} src={arenaMusicSrc} preload="auto" onEnded={() => setArenaMusicIndex(1)} />
+      <audio ref={arenaSecondMusicRef} src={arenaSecondMusicSrc} preload="auto" onEnded={() => setArenaMusicIndex(0)} />
+    </>
+  );
+
   if (menuOpen) {
     return (
-      <section className="main-menu" aria-label="Main menu">
-        <audio ref={lobbyMusicRef} src={lobbyMusicSrc} preload="auto" />
-        <audio ref={arenaMusicRef} src={arenaMusicSrc} preload="auto" />
-        <div className="main-menu-scene">
-          <div className="main-menu-sun" />
-          <div className="main-menu-ground" />
-          <div className="main-menu-stickman">
-            <span className="head" />
-            <span className="torso" />
-            <span className="arm left-arm" />
-            <span className="arm right-arm" />
-            <span className="leg left-leg" />
-            <span className="leg right-leg" />
+      <>
+        {audioDeck}
+        <section className="main-menu" aria-label="Main menu">
+          <div className="main-menu-scene">
+            <div className="main-menu-sun" />
+            <div className="main-menu-ground" />
+            <div className="main-menu-stickman">
+              <span className="head" />
+              <span className="torso" />
+              <span className="arm left-arm" />
+              <span className="arm right-arm" />
+              <span className="leg left-leg" />
+              <span className="leg right-leg" />
+            </div>
           </div>
-        </div>
-        <div className="main-menu-content">
-          <h1>Absolute cineWHAT?</h1>
-          <div className="main-menu-buttons" role="group" aria-label="Menu actions">
-            <button type="button" onClick={startFromMenu}>
-              Play
-            </button>
-            <button type="button" className={menuPanel === 'gamemods' ? 'active' : ''} onClick={() => setMenuPanel('gamemods')}>
-              Gamemods
-            </button>
-            <button type="button" className={menuPanel === 'settings' ? 'active' : ''} onClick={() => setMenuPanel('settings')}>
-              Settings
-            </button>
+          <div className="main-menu-content">
+            <h1>Absolute cineWHAT?</h1>
+            <div className="main-menu-buttons" role="group" aria-label="Menu actions">
+              <button type="button" onClick={startFromMenu}>
+                Play
+              </button>
+              <button type="button" className={menuPanel === 'gamemods' ? 'active' : ''} onClick={() => setMenuPanel('gamemods')}>
+                Gamemods
+              </button>
+              <button type="button" className={menuPanel === 'settings' ? 'active' : ''} onClick={() => setMenuPanel('settings')}>
+                Settings
+              </button>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      </>
     );
   }
 
   return (
-    <section className="lobby">
-      <audio ref={lobbyMusicRef} src={lobbyMusicSrc} preload="auto" />
-      <audio ref={arenaMusicRef} src={arenaMusicSrc} preload="auto" />
+    <>
+      {audioDeck}
+      <section className="lobby">
       <div className="lobby-topbar">
         <div>
           <p className="eyebrow">Classic lobby</p>
@@ -2535,17 +3281,24 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
             {isPaused ? 'Resume' : 'Pause'}
           </button>
         )}
-        <button
-          type="button"
-          className="menu-toggle"
-          onClick={() => {
-            pressedKeys.current.clear();
-            setMenuPanel('main');
-            setMenuOpen(true);
-          }}
-        >
-          Menu
-        </button>
+        {phase === 'arena' && isPaused && (
+          <button type="button" className="leave-toggle" onClick={leaveArenaToLobby}>
+            Leave
+          </button>
+        )}
+        {phase !== 'arena' && (
+          <button
+            type="button"
+            className="menu-toggle"
+            onClick={() => {
+              pressedKeys.current.clear();
+              setMenuPanel('main');
+              setMenuOpen(true);
+            }}
+          >
+            Menu
+          </button>
+        )}
       </div>
 
       {phase === 'arena' && deathMessage && (
@@ -2570,9 +3323,11 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
       {phase === 'arena' && (
         <div className="player-inventory" aria-label="Player inventory">
           <span>Inventory</span>
-          <button type="button" className={equippedItem === 'sword' ? 'active' : ''} disabled={!hasSword} onClick={() => setEquippedItem('sword')}>
-            Sword
-          </button>
+          {hasSword && (
+            <button type="button" className={equippedItem === 'sword' ? 'active' : ''} onClick={() => setEquippedItem('sword')}>
+              Sword
+            </button>
+          )}
           {isZombieKingAlive(zombieKing) && (
             <button type="button" className={equippedItem === 'gun' ? 'active' : ''} onClick={() => setEquippedItem('gun')}>
               Gun
@@ -2583,8 +3338,14 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
 
       <div
         ref={frameRef}
-        className={`game-frame ${phase} ${arenaMode}`}
+        className={`game-frame ${phase} ${arenaMode} ${targetedZombieId ? 'targeting-zombie' : equippedItem === 'gun' && phase === 'arena' ? 'gun-equipped' : ''}`}
         aria-label="2D classic map"
+        onPointerMove={(event) => {
+          if (phase !== 'arena' || equippedItem !== 'gun') return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          updateGunTarget({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+        }}
+        onPointerLeave={() => setTargetedZombieId(null)}
         onPointerDown={(event) => {
           if (phase !== 'arena' || (arenaMode !== 'main' && !playerInActiveDuel)) return;
           if (equippedItem === 'gun') {
@@ -2669,7 +3430,6 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
             {!hiddenArenaObjects.includes('column-one') && <div className="arena-column column-one solid-obstacle" />}
             {!hiddenArenaObjects.includes('column-two') && <div className="arena-column column-two solid-obstacle" />}
             {!hiddenArenaObjects.includes('column-three') && <div className="arena-column column-three solid-obstacle" />}
-            {!hiddenArenaObjects.includes('arena-tree-one') && <div className="arena-tree arena-tree-one" />}
             {!hiddenArenaObjects.includes('arena-tree-two') && <div className="arena-tree arena-tree-two" />}
             {!hiddenArenaObjects.includes('arena-tree-three') && <div className="arena-tree arena-tree-three" />}
             {!hiddenArenaObjects.includes('arena-tree-four') && <div className="arena-tree arena-tree-four" />}
@@ -2681,6 +3441,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
         )}
 
         {phase === 'arena' &&
+          arenaMode === 'main' &&
           doomsdayStrikes.map((strike) => {
             const displayStrike = getDoomsdayDisplayStrike(strike);
             const hasHit = Date.now() >= strike.hitAt;
@@ -2699,7 +3460,25 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
             );
           })}
 
+        {destroyedObjectMarkers.map(({ objectId, bounds }) => (
+          <div
+            key={`destroyed-${objectId}`}
+            className="destroyed-object-effect"
+            style={{
+              left: `${bounds.x + bounds.width / 2}px`,
+              top: `${bounds.y + bounds.height / 2}px`,
+              width: `${Math.max(42, bounds.width + 18)}px`,
+              height: `${Math.max(34, bounds.height + 12)}px`,
+            }}
+          >
+            <span />
+            <span />
+            <span />
+          </div>
+        ))}
+
         {phase === 'arena' &&
+          arenaMode === 'main' &&
           fireHazards.map((hazard) => {
             const bounds = getFireBounds(hazard);
             if (!bounds) return null;
@@ -2726,16 +3505,16 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
         {phase === 'arena' &&
           zombies
             .filter((zombie) => !killedZombieIdsRef.current.has(zombie.id))
-            .map((zombie) => <ZombieAvatar key={zombie.id} zombie={zombie} position={worldToScreen(zombie.position)} />)}
+            .map((zombie) => <ZombieAvatar key={zombie.id} zombie={zombie} position={worldToScreen(zombie.position)} isTargeted={zombie.id === targetedZombieId} />)}
 
         {phase === 'arena' &&
           isZombieKingAlive(zombieKing) &&
           kingZombies
             .filter((zombie) => !killedZombieIdsRef.current.has(zombie.id) && (zombie.health ?? 0) > 0)
-            .map((zombie) => <ZombieAvatar key={zombie.id} zombie={zombie} position={worldToScreen(zombie.position)} />)}
+            .map((zombie) => <ZombieAvatar key={zombie.id} zombie={zombie} position={worldToScreen(zombie.position)} isTargeted={zombie.id === targetedZombieId} />)}
 
         {phase === 'arena' && isZombieKingAlive(zombieKing) && zombieKing && (
-          <ZombieAvatar zombie={zombieKing} position={worldToScreen(zombieKing.position)} />
+          <ZombieAvatar zombie={zombieKing} position={worldToScreen(zombieKing.position)} isTargeted={zombieKing.id === targetedZombieId} />
         )}
 
         {phase === 'arena' &&
@@ -2744,7 +3523,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
             .map((bot) => <PlayerAvatar key={bot.clientId} player={bot} position={worldToScreen(bot.position)} />)}
 
         {(phase === 'lobby' || arenaMode === 'main' || playerInActiveDuel) && (
-          <PlayerAvatar player={playerSnapshot} position={worldToScreen(playerSnapshot.position)} isLocal />
+          <PlayerAvatar player={playerSnapshot} position={worldToScreen(playerSnapshot.position)} isLocal equippedItem={equippedItem} />
         )}
       </div>
 
@@ -2794,6 +3573,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange }: LobbyProps) {
           </button>
         </div>
       </div>
-    </section>
+      </section>
+    </>
   );
 }

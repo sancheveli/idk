@@ -545,7 +545,8 @@ button.small {
 }
 
 .menu-toggle,
-.pause-toggle {
+.pause-toggle,
+.leave-toggle {
   min-height: 44px;
   padding: 10px 14px;
   border: 2px solid #222;
@@ -557,6 +558,11 @@ button.small {
 
 .pause-toggle {
   background: #ffffff;
+}
+
+.leave-toggle {
+  background: #ef4444;
+  color: #fff7ed;
 }
 
 .round-label {
@@ -687,6 +693,23 @@ button.small {
     linear-gradient(135deg, #5fc44b, #48a93d);
   background-size: 48px 48px, 48px 48px, 100% 100%;
   box-shadow: 8px 8px 0 #222;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.main-menu,
+.lobby,
+.server-announcement,
+.spawn-pad,
+.arena-center,
+.duel-arena-center,
+.shop-title,
+.shop-card-title,
+.nameplate,
+.round-info,
+.player-inventory {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .game-frame.arena {
@@ -713,6 +736,14 @@ button.small {
 
 .game-frame.arena::before {
   display: none;
+}
+
+.game-frame.gun-equipped {
+  cursor: crosshair;
+}
+
+.game-frame.targeting-zombie {
+  cursor: crosshair;
 }
 
 .spawn-pad {
@@ -1045,11 +1076,6 @@ button.small {
   background: #16723a;
   box-shadow: 5px 5px 0 rgba(34, 34, 34, 0.18);
   content: "";
-}
-
-.arena-tree-one {
-  left: 116px;
-  top: 104px;
 }
 
 .arena-tree-two {
@@ -1665,6 +1691,44 @@ button.small {
   transition: left 120ms linear, top 120ms linear;
 }
 
+.zombie-targeted::before {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  width: 76px;
+  height: 76px;
+  transform: translate(-50%, -50%);
+  border: 3px solid #facc15;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 3px rgba(17, 24, 39, 0.7),
+    0 0 18px rgba(250, 204, 21, 0.75);
+  content: "";
+  pointer-events: none;
+}
+
+.zombie-targeted::after {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  width: 96px;
+  height: 3px;
+  transform: translate(-50%, -50%);
+  background: #facc15;
+  box-shadow: 0 0 0 2px rgba(17, 24, 39, 0.58);
+  content: "";
+  pointer-events: none;
+}
+
+.zombie-king.zombie-targeted::before {
+  width: 108px;
+  height: 108px;
+}
+
+.zombie-king.zombie-targeted::after {
+  width: 128px;
+}
+
 .zombie-stickman {
   position: absolute;
   inset: 14px 4px 0;
@@ -1812,28 +1876,11 @@ button.small {
 }
 
 .zombie-sword {
-  position: absolute !important;
-  right: 0;
-  top: 20px;
-  width: 10px;
-  height: 54px;
-  transform: rotate(-42deg);
-  transform-origin: 50% 100%;
-  background: transparent !important;
-}
-
-.zombie-sword span {
-  position: absolute;
-  left: 3px;
-  top: 0;
-  width: 5px;
-  height: 46px;
-  border: 2px solid #111827;
-  background: #e5e7eb;
+  pointer-events: none;
 }
 
 .zombie-sword.swing {
-  animation: sword-swing 260ms ease-out infinite alternate;
+  animation: sword-swing 260ms ease-out;
 }
 
 .player.back .head::before,
@@ -1860,6 +1907,126 @@ button.small {
   cursor: pointer;
   pointer-events: none;
   z-index: 2;
+}
+
+.classic-gun {
+  position: absolute;
+  left: -12px;
+  top: 21px;
+  width: 62px;
+  height: 38px;
+  transform: rotate(-8deg);
+  transform-origin: 36px 18px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.gun-sight,
+.gun-barrel,
+.gun-muzzle,
+.gun-slide,
+.gun-body,
+.gun-trigger,
+.gun-trigger-guard,
+.gun-grip {
+  position: absolute;
+  display: block;
+  border: 2px solid #111827;
+  border-radius: 0;
+  box-shadow: 2px 2px 0 rgba(17, 24, 39, 0.25);
+}
+
+.gun-sight {
+  left: 24px;
+  top: 0;
+  width: 10px;
+  height: 6px;
+  border-bottom: 0;
+  background: #facc15;
+  box-shadow: 1px 1px 0 rgba(17, 24, 39, 0.25);
+}
+
+.gun-barrel {
+  left: 34px;
+  top: 9px;
+  width: 23px;
+  height: 9px;
+  border-left: 0;
+  background: #6b7280;
+}
+
+.gun-muzzle {
+  left: 55px;
+  top: 7px;
+  width: 8px;
+  height: 13px;
+  background: #6b7280;
+}
+
+.gun-slide {
+  left: 13px;
+  top: 5px;
+  width: 26px;
+  height: 14px;
+  background: #9ca3af;
+}
+
+.gun-slide::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 3px;
+  width: 13px;
+  height: 3px;
+  background: #e5e7eb;
+}
+
+.gun-body {
+  left: 15px;
+  top: 17px;
+  width: 29px;
+  height: 12px;
+  background: #4b5563;
+}
+
+.gun-trigger {
+  left: 28px;
+  top: 26px;
+  width: 5px;
+  height: 9px;
+  border: 0;
+  background: #374151;
+  box-shadow: none;
+}
+
+.gun-trigger-guard {
+  left: 23px;
+  top: 25px;
+  width: 14px;
+  height: 11px;
+  border-top: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.gun-grip {
+  left: 13px;
+  top: 26px;
+  width: 13px;
+  height: 18px;
+  transform: rotate(15deg);
+  transform-origin: top center;
+  background: #7c2d12;
+}
+
+.gun-grip::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 3px;
+  height: 10px;
+  background: #c2410c;
 }
 
 .fire-hazard {
@@ -1943,17 +2110,103 @@ button.small {
   animation: doomsday-hit 220ms ease-out forwards;
 }
 
-.player.left .classic-sword {
+.destroyed-object-effect {
+  position: absolute;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.destroyed-object-effect::before {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: 6px;
+  height: 14px;
+  border: 3px solid rgba(17, 24, 39, 0.72);
+  background:
+    linear-gradient(135deg, #57534e 0 22%, transparent 22% 34%, #78716c 34% 58%, transparent 58% 68%, #44403c 68%),
+    #a8a29e;
+  box-shadow: 4px 4px 0 rgba(17, 24, 39, 0.18);
+  content: "";
+}
+
+.destroyed-object-effect span {
+  position: absolute;
+  bottom: 20px;
+  display: block;
+  width: 18px;
+  height: 18px;
+  border: 3px solid rgba(68, 64, 60, 0.35);
+  border-radius: 50%;
+  background: rgba(214, 211, 209, 0.7);
+  animation: smoke-rise 1.8s ease-in-out infinite;
+}
+
+.destroyed-object-effect span:nth-child(1) {
+  left: 24%;
+  animation-delay: 0ms;
+}
+
+.destroyed-object-effect span:nth-child(2) {
+  left: 46%;
+  width: 22px;
+  height: 22px;
+  animation-delay: 280ms;
+}
+
+.destroyed-object-effect span:nth-child(3) {
+  left: 66%;
+  animation-delay: 560ms;
+}
+
+.player.left .classic-sword,
+.zombie.left .classic-sword {
   left: auto;
   right: 8px;
   top: -14px;
 }
 
-.player.right .classic-sword {
+.player.right .classic-sword,
+.zombie.right .classic-sword {
   left: auto;
   right: -15px;
   top: -15px;
   transform: rotate(38deg);
+}
+
+.zombie-king .zombie-sword {
+  left: 9px;
+  top: -3px;
+  transform: rotate(-35deg);
+}
+
+.zombie-king.left .zombie-sword {
+  left: 4px;
+  right: auto;
+  top: -1px;
+  transform: rotate(-42deg);
+}
+
+.zombie-king.right .zombie-sword {
+  left: auto;
+  right: 3px;
+  top: -1px;
+  transform: rotate(42deg);
+}
+
+.player.left .classic-gun {
+  left: auto;
+  right: 19px;
+  top: 25px;
+  transform: scaleX(-1) rotate(-12deg);
+}
+
+.player.right .classic-gun {
+  left: auto;
+  right: -12px;
+  top: 25px;
+  transform: rotate(12deg);
 }
 
 .classic-sword:hover,
@@ -1967,7 +2220,8 @@ button.small {
   animation: sword-swing 260ms ease-out;
 }
 
-.player.right .classic-sword.swing {
+.player.right .classic-sword.swing,
+.zombie.right .classic-sword.swing {
   animation: sword-swing-right 260ms ease-out;
 }
 
@@ -2061,6 +2315,22 @@ button.small {
   100% {
     opacity: 0;
     transform: translate(-50%, -50%) scale(1.24);
+  }
+}
+
+@keyframes smoke-rise {
+  0% {
+    opacity: 0.24;
+    transform: translateY(8px) scale(0.72);
+  }
+
+  45% {
+    opacity: 0.58;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-18px) scale(1.2);
   }
 }
 

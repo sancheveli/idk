@@ -156,17 +156,33 @@ export function Auth({ onAuthenticated }: AuthProps) {
     setMessage('');
 
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
+      const redirectTo = `${window.location.origin}/`;
+      const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: window.location.origin,
+          redirectTo,
+          queryParams: {
+            prompt: 'select_account',
+          },
+          skipBrowserRedirect: true,
         },
       });
 
-      if (error) showMessage(error.message);
+      if (error) {
+        showMessage(error.message);
+        setBusy(false);
+        return;
+      }
+
+      if (!data.url) {
+        showMessage('Google sign in could not start. Please try again.');
+        setBusy(false);
+        return;
+      }
+
+      window.location.assign(data.url);
     } catch {
       showMessage('Google sign in failed. Please try again.');
-    } finally {
       setBusy(false);
     }
   }
@@ -298,7 +314,7 @@ export function Auth({ onAuthenticated }: AuthProps) {
             </div>
             <button type="button" className="google-auth-button" disabled={busy} onClick={handleGoogleSignIn}>
               <span aria-hidden="true">G</span>
-              Continue with Google
+              {busy ? 'Opening Google...' : 'Continue with Google'}
             </button>
           </div>
         )}
