@@ -21,6 +21,10 @@ export default function App() {
     session?.user.user_metadata.full_name ||
     session?.user.email?.split('@')[0] ||
     'Player';
+  const signOut = () => {
+    clearSavedRuns();
+    void supabase.auth.signOut();
+  };
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -45,16 +49,10 @@ export default function App() {
 
   return (
     <main className="container">
-      {session && (
-        <header className={`header ${gameMenuOpen ? 'menu-header' : ''}`}>
-          {!gameMenuOpen && <h1>Spawn Plaza</h1>}
-          <button
-            className={gameMenuOpen ? 'menu-sign-out' : 'ghost'}
-            onClick={() => {
-              clearSavedRuns();
-              void supabase.auth.signOut();
-            }}
-          >
+      {session && !gameMenuOpen && (
+        <header className="header">
+          <h1>Spawn Plaza</h1>
+          <button className="ghost" onClick={signOut}>
             Sign out
           </button>
         </header>
@@ -63,7 +61,7 @@ export default function App() {
       {!session ? (
         <Auth onAuthenticated={setSession} />
       ) : (
-        <Lobby nickname={nickname} userId={session.user.id} onMenuOpenChange={setGameMenuOpen} />
+        <Lobby nickname={nickname} userId={session.user.id} onMenuOpenChange={setGameMenuOpen} onSignOut={signOut} />
       )}
     </main>
   );

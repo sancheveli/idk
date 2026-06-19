@@ -9,7 +9,11 @@
 // Модель можно поменять (gemini-2.0-flash — быстрая и бесплатная).
 
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-const MODEL = 'gemini-2.0-flash';
+const MODEL = 'gemini-2.5-flash';
+const GAME_ONLY_SYSTEM = `You are the in-game assistant for Absolute cineWHAT?.
+Only answer questions about this specific game: its menu, controls, gamemods, settings, lobby, arena, events, combat, shop, bots, zombies, duel mode, and visible gameplay rules.
+If the user asks about anything outside the game, politely say you can only answer questions about the game.
+Keep answers concise and practical.`;
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -26,19 +30,24 @@ Deno.serve(async (req) => {
     const { prompt, system } = await req.json();
     if (!prompt) throw new Error('Нужно поле prompt');
 
+    const systemText = system ? `${GAME_ONLY_SYSTEM}\n\nGame context:\n${system}` : GAME_ONLY_SYSTEM;
+
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          systemInstruction: system ? { parts: [{ text: system }] } : undefined,
+          systemInstruction: { parts: [{ text: systemText }] },
           contents: [{ parts: [{ text: prompt }] }],
         }),
       },
     );
 
     const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error?.message ?? 'Gemini request failed');
+    }
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     return new Response(JSON.stringify({ text }), {
       headers: { ...cors, 'Content-Type': 'application/json' },

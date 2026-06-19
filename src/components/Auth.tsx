@@ -10,6 +10,13 @@ type AuthProps = {
   onAuthenticated?: (session: Session) => void;
 };
 
+function getAuthRedirectUrl() {
+  const configuredRedirectUrl = import.meta.env.VITE_AUTH_REDIRECT_URL as string | undefined;
+  if (configuredRedirectUrl) return configuredRedirectUrl;
+
+  return new URL('/', window.location.href).toString();
+}
+
 function getPasswordIssues(password: string) {
   const issues = [];
   if (password.length < 8) issues.push('8+ characters');
@@ -116,7 +123,7 @@ export function Auth({ onAuthenticated }: AuthProps) {
 
       if (mode === 'reset') {
         const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
-          redirectTo: window.location.origin,
+          redirectTo: getAuthRedirectUrl(),
         });
 
         if (error) {
@@ -156,7 +163,7 @@ export function Auth({ onAuthenticated }: AuthProps) {
     setMessage('');
 
     try {
-      const redirectTo = `${window.location.origin}/`;
+      const redirectTo = getAuthRedirectUrl();
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
