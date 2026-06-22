@@ -1,0 +1,905 @@
+import { createServer } from 'node:http';
+import { Server } from 'socket.io';
+
+const port = Number(process.env.SOCKET_PORT || process.env.PORT || 3001);
+const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const maxPlayersPerRoom = 5;
+const movementTickMs = 80;
+const eventIntervalMs = 7000;
+const loweredTowerDurationMs = 30000;
+const lobbyDurationMs = 10000;
+const reconnectGraceMs = 30000;
+const freezeDurationMs = 7000;
+const swordDamage = 5;
+const swordCooldownMs = 2000;
+const swordRange = 86;
+const baseStep = 14;
+const rapidStep = 24;
+const towerAirStep = 32;
+const towerLandingY = 291.5;
+const loweredTowerOffset = 74;
+const towerEdgeInset = 10;
+const towerPlatforms = [
+  { left: 52.5, right: 202.5 },
+  { left: 277.5, right: 427.5 },
+  { left: 502.5, right: 652.5 },
+  { left: 727.5, right: 877.5 },
+  { left: 952.5, right: 1102.5 },
+];
+const towerEvents = [
+  'Someone gets a sword',
+  'Two towers are lowered',
+  'Someones tower will disappear',
+  'A bomb will detonate soon',
+  'everyday im shuffling',
+  'PIZZA DELIVERY',
+  'SURVIVE THE DOOMSDAY',
+  "A warp tool is teleporting into someone's hands",
+  'Freeze',
+  'Someone ate too many whoppers',
+  'Deadly missles are coming for you!',
+  'OH GREAT HEAVENS',
+];
+const defaultDecorations = {
+  roofColor: '#facc15',
+  bodyColor: '#ef4444',
+  windowColor: '#bae6fd',
+  updatedBy: 'server',
+  updatedAt: Date.now(),
+};
+
+function getBaseNickname(name) {
+  const trimmedName = String(name || '').trim();
+  if (!trimmedName) return 'Player';
+  if (trimmedName.length > 15 || isInappropriateUsername(trimmedName)) return 'Noob';
+  return trimmedName;
+}
+
+function normalizeUsernameForModeration(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[@]/g, 'a')
+    .replace(/[1!|]/g, 'i')
+    .replace(/[0]/g, 'o')
+    .replace(/[3]/g, 'e')
+    .replace(/[4]/g, 'a')
+    .replace(/[5$]/g, 's')
+    .replace(/[7]/g, 't')
+    .replace(/[^a-z]/g, '');
+}
+
+function isInappropriateUsername(name) {
+  const normalizedName = normalizeUsernameForModeration(name);
+  const blockedWords = [
+    'asshole',
+    'bastard',
+    'bitch',
+    'cunt',
+    'dick',
+    'fag',
+    'fuck',
+    'hitler',
+    'kike',
+    'nazi',
+    'nigger',
+    'nigga',
+    'penis',
+    'pussy',
+    'retard',
+    'shit',
+    'slut',
+    'whore',
+  ];
+
+  return blockedWords.some((word) => normalizedName.includes(word));
+}
+
+function getUsedNicknames(clientId) {
+  return new Set(
+    Array.from(rooms.values()).flatMap((room) =>
+      Array.from(room.players.values())
+        .filter((player) => player.clientId !== clientId)
+        .map((player) => player.nickname),
+    ),
+  );
+}
+
+function getNextGlobalNoobName(usedNames) {
+  if (!usedNames.has('Noob')) return 'Noob';
+
+  let suffix = 2;
+  while (usedNames.has(`Noob${suffix}`)) suffix += 1;
+  return `Noob${suffix}`;
+}
+
+function getUniqueNickname(clientId, requestedName) {
+  const baseName = getBaseNickname(requestedName);
+  const usedNames = getUsedNicknames(clientId);
+
+  if (!usedNames.has(baseName)) return baseName;
+  return getNextGlobalNoobName(usedNames);
+}
+
+function sanitizeDecorations(value, fallback) {
+  return {
+    roofColor: String(value?.roofColor || fallback.roofColor).slice(0, 24),
+    bodyColor: String(value?.bodyColor || fallback.bodyColor).slice(0, 24),
+    windowColor: String(value?.windowColor || fallback.windowColor).slice(0, 24),
+    updatedBy: fallback.updatedBy || 'server',
+    updatedAt: Date.now(),
+  };
+}
+
+const httpServer = createServer();
+const io = new Server(httpServer, {
+  cors: {
+    origin: clientOrigin,
+    methods: ['GET', 'POST'],
+  },
+});
+
+const rooms = new Map();
+const clientRooms = new Map();
+let nextRoomNumber = 1;
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function createRoom() {
+  const now = Date.now();
+  const room = {
+    id: `tower-${nextRoomNumber}`,
+    players: new Map(),
+    phase: 'lobby',
+    decorations: { ...defaultDecorations, updatedAt: now },
+    currentEvent: {
+      id: `waiting-${now}`,
+      message: 'Waiting for next round...',
+      selectedAt: now,
+      slot: 0,
+    },
+    eventSlot: 0,
+    roundStartedAt: now,
+    lobbyEndsAt: now + lobbyDurationMs,
+    nextEventAt: now + lobbyDurationMs,
+    roundPlayerCount: 0,
+    winnerId: '',
+    winnerName: '',
+    usedDoomsday: false,
+    loweredTowers: [],
+    hiddenTowers: [],
+    bombs: [],
+    explosions: [],
+    doomsdayStrikes: [],
+    missiles: [],
+  };
+
+  nextRoomNumber += 1;
+  rooms.set(room.id, room);
+  return room;
+}
+
+function getActivePlayers(room) {
+  return Array.from(room.players.values()).filter((player) => player.connected);
+}
+
+function getRoomSocketCount(room) {
+  return io.sockets.adapter.rooms.get(room.id)?.size ?? 0;
+}
+
+function roomHasSockets(room) {
+  return getRoomSocketCount(room) > 0;
+}
+
+function pauseEmptyRoom(room, now = Date.now()) {
+  for (const player of room.players.values()) {
+    player.connected = false;
+    player.input = { left: false, right: false, airborne: false };
+    if (!player.disconnectedAt) player.disconnectedAt = now;
+  }
+
+  room.roundStartedAt = now;
+  room.phase = 'lobby';
+  room.lobbyEndsAt = now + lobbyDurationMs;
+  room.nextEventAt = room.lobbyEndsAt;
+  room.winnerId = '';
+  room.winnerName = '';
+  room.usedDoomsday = false;
+  room.loweredTowers = [];
+  room.hiddenTowers = [];
+  room.bombs = [];
+  room.explosions = [];
+  room.doomsdayStrikes = [];
+  room.missiles = [];
+  room.currentEvent = {
+    id: `waiting-${room.id}-${now}`,
+    message: 'Waiting for next round...',
+    selectedAt: now,
+    slot: room.eventSlot,
+  };
+}
+
+function getReservablePlayers(room) {
+  const now = Date.now();
+  return Array.from(room.players.values()).filter((player) => player.connected || now - player.disconnectedAt < reconnectGraceMs);
+}
+
+function getRoomForClient(clientId) {
+  const existingRoomId = clientRooms.get(clientId);
+  const existingRoom = existingRoomId ? rooms.get(existingRoomId) : null;
+  if (existingRoom?.players.has(clientId)) return existingRoom;
+
+  for (const room of rooms.values()) {
+    if (getReservablePlayers(room).length < maxPlayersPerRoom) return room;
+  }
+
+  return createRoom();
+}
+
+function getSpawnPosition(slot = 0) {
+  const platform = towerPlatforms[slot % towerPlatforms.length] || towerPlatforms[0];
+  return {
+    x: (platform.left + platform.right) / 2,
+    y: towerLandingY,
+  };
+}
+
+function getNextOpenSlot(room, clientId) {
+  const usedSlots = new Set(
+    Array.from(room.players.values())
+      .filter((player) => player.clientId !== clientId)
+      .map((player) => player.slot),
+  );
+
+  for (let slot = 0; slot < maxPlayersPerRoom; slot += 1) {
+    if (!usedSlots.has(slot)) return slot;
+  }
+
+  return 0;
+}
+
+function getMovementBounds() {
+  return {
+    minX: towerPlatforms[0].left + towerEdgeInset,
+    maxX: towerPlatforms[towerPlatforms.length - 1].right - towerEdgeInset,
+    minY: towerLandingY,
+    maxY: towerLandingY + loweredTowerOffset,
+  };
+}
+
+function getActivePlatformSlots(room) {
+  const hiddenSlots = new Set(room.hiddenTowers.map((effect) => effect.slot));
+  return towerPlatforms
+    .map((platform, slot) => ({ platform, slot }))
+    .filter(({ slot }) => !hiddenSlots.has(slot));
+}
+
+function getPlatformLandingY(room, slot) {
+  return room.loweredTowers.some((effect) => effect.slot === slot) ? towerLandingY + loweredTowerOffset : towerLandingY;
+}
+
+function getLandingAt(room, position) {
+  const activePlatform = getActivePlatformSlots(room).find(({ platform }) => position.x >= platform.left + towerEdgeInset && position.x <= platform.right - towerEdgeInset);
+  if (!activePlatform) return null;
+
+  return {
+    x: clamp(position.x, activePlatform.platform.left + towerEdgeInset, activePlatform.platform.right - towerEdgeInset),
+    y: getPlatformLandingY(room, activePlatform.slot),
+    slot: activePlatform.slot,
+  };
+}
+
+function isOnPlatform(room, position) {
+  const landing = getLandingAt(room, position);
+  return Boolean(landing && Math.abs(position.y - landing.y) <= 1);
+}
+
+function serializePlayer(player) {
+  return {
+    clientId: player.clientId,
+    userId: player.userId,
+    nickname: player.nickname,
+    position: player.position,
+    direction: player.direction,
+    connected: player.connected,
+    updatedAt: player.updatedAt,
+    decorations: player.decorations,
+    slot: player.slot,
+    status: player.status,
+    hp: player.hp,
+    hasSword: player.hasSword,
+    hasPizza: player.hasPizza,
+    hasWarp: player.hasWarp,
+    frozenUntil: player.frozenUntil,
+    isFat: player.isFat,
+  };
+}
+
+function snapshot(room) {
+  const now = Date.now();
+
+  return {
+    roomId: room.id,
+    phase: room.phase,
+    players: getReservablePlayers(room).map(serializePlayer),
+    decorations: room.decorations,
+    currentEvent: room.currentEvent,
+    roundStartedAt: room.roundStartedAt,
+    nextEventAt: room.nextEventAt,
+    eventSlot: room.eventSlot,
+    winnerId: room.winnerId,
+    winnerName: room.winnerName,
+    effects: {
+      loweredTowers: room.loweredTowers,
+      hiddenTowers: room.hiddenTowers,
+      bombs: room.bombs,
+      explosions: room.explosions,
+      doomsdayStrikes: room.doomsdayStrikes,
+      missiles: room.missiles,
+    },
+    activePlayerCount: getRoomSocketCount(room),
+    maxPlayers: maxPlayersPerRoom,
+    serverTime: now,
+  };
+}
+
+function broadcastSnapshot(room) {
+  io.to(room.id).emit('tower:snapshot', snapshot(room));
+}
+
+function chooseServerEvent(room) {
+  if (!roomHasSockets(room)) return;
+  if (room.phase !== 'arena') return;
+
+  const now = Date.now();
+  room.eventSlot += 1;
+  let message = towerEvents[(room.eventSlot - 1) % towerEvents.length];
+  if (message === 'SURVIVE THE DOOMSDAY' && room.usedDoomsday) {
+    message = 'OH GREAT HEAVENS';
+  }
+  room.currentEvent = {
+    id: `${room.id}-${now}-${room.eventSlot}`,
+    message,
+    selectedAt: now,
+    slot: room.eventSlot,
+  };
+  room.nextEventAt = now + eventIntervalMs;
+  applyTowerEvent(room, message, now);
+
+  io.to(room.id).emit('tower:event', room.currentEvent);
+  broadcastSnapshot(room);
+}
+
+function getAlivePlayers(room) {
+  return Array.from(room.players.values()).filter((player) => player.status === 'alive' && player.connected);
+}
+
+function getRandomItems(items, count, seed = Date.now()) {
+  return [...items]
+    .map((item, index) => ({ item, sort: Math.sin(seed + index * 999) }))
+    .sort((a, b) => a.sort - b.sort)
+    .slice(0, count)
+    .map(({ item }) => item);
+}
+
+function damagePlayer(player, amount, room) {
+  if (!player || player.status !== 'alive') return;
+  player.hp = Math.max(0, (player.hp ?? 100) - amount);
+  if (player.hp <= 0) {
+    player.status = 'waiting';
+    player.input = { left: false, right: false, airborne: false };
+  }
+  player.updatedAt = Date.now();
+  if (room) checkRoundEnd(room);
+}
+
+function applyTowerEvent(room, message, now = Date.now()) {
+  const alivePlayers = getAlivePlayers(room);
+  if (alivePlayers.length === 0) return;
+
+  if (message === 'Someone gets a sword') {
+    getRandomItems(alivePlayers, 1, now)[0].hasSword = true;
+    return;
+  }
+
+  if (message === 'Two towers are lowered') {
+    room.loweredTowers = getRandomItems([0, 1, 2, 3, 4], 2, now).map((slot) => ({ slot, until: now + loweredTowerDurationMs }));
+    return;
+  }
+
+  if (message === 'Someones tower will disappear') {
+    room.hiddenTowers = getRandomItems([0, 1, 2, 3, 4], 1, now).map((slot) => ({ slot, until: now + eventIntervalMs }));
+    return;
+  }
+
+  if (message === 'A bomb will detonate soon') {
+    const slot = getRandomItems([0, 1, 2, 3, 4], 1, now)[0];
+    const spawn = getSpawnPosition(slot);
+    room.bombs.push({ id: `bomb-${now}`, slot, x: spawn.x, y: spawn.y - 72, spawnedAt: now, explodesAt: now + 30000 });
+    return;
+  }
+
+  if (message === 'everyday im shuffling') {
+    const positions = alivePlayers.map((player) => player.position);
+    const shuffled = getRandomItems(positions, positions.length, now);
+    alivePlayers.forEach((player, index) => {
+      player.position = shuffled[index] || player.position;
+      player.updatedAt = now;
+    });
+    return;
+  }
+
+  if (message === 'PIZZA DELIVERY') {
+    alivePlayers.forEach((player) => {
+      player.hasPizza = true;
+    });
+    return;
+  }
+
+  if (message === 'SURVIVE THE DOOMSDAY') {
+    room.usedDoomsday = true;
+    const slots = getRandomItems([0, 1, 2, 3, 4], 2, now);
+    room.doomsdayStrikes.push(
+      { id: `tower-doom-${now}-1`, slot: slots[0], warningAt: now, hitAt: now + 3000, endsAt: now + 3900 },
+      { id: `tower-doom-${now}-2`, slot: slots[1], warningAt: now + 3000, hitAt: now + 6000, endsAt: now + 6900 },
+    );
+    return;
+  }
+
+  if (message === "A warp tool is teleporting into someone's hands") {
+    getRandomItems(alivePlayers, 1, now)[0].hasWarp = true;
+    return;
+  }
+
+  if (message === 'Freeze') {
+    getRandomItems(alivePlayers, 1, now)[0].frozenUntil = now + freezeDurationMs;
+    return;
+  }
+
+  if (message === 'Someone ate too many whoppers') {
+    const player = getRandomItems(alivePlayers, 1, now)[0];
+    player.isFat = true;
+    player.hp = 150;
+    return;
+  }
+
+  if (message === 'Deadly missles are coming for you!') {
+    const targetCount = alivePlayers.length >= 4 ? 2 : 1;
+    getRandomItems(alivePlayers, targetCount, now).forEach((player) => {
+      room.missiles.push({ id: `missile-${now}-${player.clientId}`, targetClientId: player.clientId, launchedAt: now, hitAt: now + 4000 });
+    });
+  }
+}
+
+function startRound(room, now = Date.now()) {
+  const participatingPlayers = getReservablePlayers(room).filter((player) => player.connected || player.status === 'ready');
+  if (participatingPlayers.length === 0) {
+    pauseEmptyRoom(room, now);
+    return;
+  }
+
+  if (participatingPlayers.filter((player) => player.connected).length < 2) {
+    room.phase = 'lobby';
+    room.lobbyEndsAt = now + lobbyDurationMs;
+    room.nextEventAt = room.lobbyEndsAt;
+    room.currentEvent = {
+      id: `waiting-for-players-${room.id}-${now}`,
+      message: 'Waiting for more players...',
+      selectedAt: now,
+      slot: room.eventSlot,
+    };
+    for (const player of room.players.values()) {
+      player.status = player.connected ? 'ready' : 'waiting';
+      player.input = { left: false, right: false, airborne: false };
+      player.updatedAt = now;
+    }
+    broadcastSnapshot(room);
+    return;
+  }
+
+  room.phase = 'arena';
+  room.roundStartedAt = now;
+  room.eventSlot = 0;
+  room.nextEventAt = now + eventIntervalMs;
+  room.roundPlayerCount = participatingPlayers.length;
+  room.winnerId = '';
+  room.winnerName = '';
+  room.usedDoomsday = false;
+  room.loweredTowers = [];
+  room.hiddenTowers = [];
+  room.bombs = [];
+  room.explosions = [];
+  room.doomsdayStrikes = [];
+  room.missiles = [];
+  room.currentEvent = {
+    id: `round-${room.id}-${now}`,
+    message: 'Arena events starting...',
+    selectedAt: now,
+    slot: 0,
+  };
+
+  for (const player of room.players.values()) {
+    if (player.connected || player.status === 'ready') {
+      player.status = 'alive';
+      player.hp = 100;
+      player.hasSword = false;
+      player.hasPizza = false;
+      player.hasWarp = false;
+      player.frozenUntil = 0;
+      player.isFat = false;
+      player.position = getSpawnPosition(player.slot);
+      player.direction = 'front';
+      player.input = { left: false, right: false, airborne: false };
+      player.updatedAt = now;
+    } else {
+      player.status = 'waiting';
+    }
+  }
+
+  broadcastSnapshot(room);
+}
+
+function endRound(room, winner, now = Date.now()) {
+  room.phase = 'lobby';
+  room.lobbyEndsAt = now + lobbyDurationMs;
+  room.nextEventAt = room.lobbyEndsAt;
+  room.winnerId = winner?.clientId || '';
+  room.winnerName = winner?.nickname || '';
+  room.currentEvent = {
+    id: `round-over-${room.id}-${now}`,
+    message: winner ? `${winner.nickname} wins` : 'Round over',
+    selectedAt: now,
+    slot: room.eventSlot,
+  };
+
+  for (const player of room.players.values()) {
+    player.status = player.connected ? 'ready' : 'waiting';
+    player.input = { left: false, right: false, airborne: false };
+    player.updatedAt = now;
+  }
+
+  broadcastSnapshot(room);
+}
+
+function checkRoundEnd(room) {
+  if (room.phase !== 'arena') return;
+
+  const alivePlayers = Array.from(room.players.values()).filter((player) => player.status === 'alive' && player.connected);
+  if (alivePlayers.length === 0 || (alivePlayers.length === 1 && room.roundPlayerCount > 1)) {
+    endRound(room, alivePlayers[0]);
+  }
+}
+
+function applyMovement(room, player) {
+  if (!player.connected || player.status !== 'alive') return;
+  if (player.frozenUntil && player.frozenUntil > Date.now()) return;
+
+  const step = player.rapidUntil > Date.now() ? rapidStep : baseStep;
+  const dx = (Number(player.input.right) - Number(player.input.left)) * (player.input.airborne ? towerAirStep : step);
+  if (dx === 0) return;
+
+  player.direction = dx > 0 ? 'right' : 'left';
+  const bounds = getMovementBounds();
+  const nextPosition = {
+    x: clamp(player.position.x + dx, bounds.minX, bounds.maxX),
+    y: clamp(player.position.y, bounds.minY, bounds.maxY),
+  };
+
+  if (!player.input.airborne && !isOnPlatform(room, nextPosition)) return;
+
+  player.position = nextPosition;
+  player.updatedAt = Date.now();
+}
+
+function reconcilePlayerPlatforms(room) {
+  for (const player of getAlivePlayers(room)) {
+    if (player.input.airborne) continue;
+
+    const landing = getLandingAt(room, player.position);
+    if (!landing) continue;
+
+    if (!player.input.airborne && Math.abs(player.position.y - landing.y) > 1) {
+      player.position = { x: landing.x, y: landing.y };
+      player.updatedAt = Date.now();
+    }
+  }
+}
+
+function updateTimedTowerEffects(room, now = Date.now()) {
+  room.loweredTowers = room.loweredTowers.filter((effect) => now < effect.until);
+  room.hiddenTowers = room.hiddenTowers.filter((effect) => now < effect.until);
+  room.explosions = room.explosions.filter((effect) => now < effect.endsAt);
+  room.doomsdayStrikes = room.doomsdayStrikes.filter((effect) => now < effect.endsAt);
+
+  const explodingBombs = room.bombs.filter((bomb) => now >= bomb.explodesAt);
+  room.bombs = room.bombs.filter((bomb) => now < bomb.explodesAt);
+  explodingBombs.forEach((bomb) => {
+    room.explosions.push({ id: `explosion-${bomb.id}`, x: bomb.x, y: bomb.y, startedAt: now, endsAt: now + 1100 });
+    getAlivePlayers(room).forEach((player) => {
+      if (Math.hypot(player.position.x - bomb.x, player.position.y - bomb.y) < 50) {
+        damagePlayer(player, 50, room);
+      }
+    });
+  });
+
+  const hittingMissiles = room.missiles.filter((missile) => now >= missile.hitAt);
+  room.missiles = room.missiles.filter((missile) => now < missile.hitAt);
+  hittingMissiles.forEach((missile) => {
+    const target = room.players.get(missile.targetClientId);
+    const targetPosition = target?.position;
+    if (!targetPosition) return;
+    room.explosions.push({ id: `missile-explosion-${missile.id}`, x: targetPosition.x, y: targetPosition.y, startedAt: now, endsAt: now + 900 });
+    getAlivePlayers(room).forEach((player) => {
+      if (Math.hypot(player.position.x - targetPosition.x, player.position.y - targetPosition.y) < 45) {
+        damagePlayer(player, 99, room);
+      }
+    });
+  });
+
+  reconcilePlayerPlatforms(room);
+}
+
+function pruneRooms() {
+  const now = Date.now();
+
+  for (const room of rooms.values()) {
+    for (const [clientId, player] of room.players.entries()) {
+      if (!player.connected && now - player.disconnectedAt > reconnectGraceMs) {
+        room.players.delete(clientId);
+        if (clientRooms.get(clientId) === room.id) clientRooms.delete(clientId);
+      }
+    }
+
+    if (room.players.size === 0) {
+      rooms.delete(room.id);
+    }
+  }
+}
+
+function removePlayerFromRoom(room, clientId) {
+  const player = room.players.get(clientId);
+  if (!player) return;
+
+  room.players.delete(clientId);
+  if (clientRooms.get(clientId) === room.id) clientRooms.delete(clientId);
+  if (room.players.size === 0) {
+    pauseEmptyRoom(room);
+    rooms.delete(room.id);
+    return;
+  }
+
+  broadcastSnapshot(room);
+}
+
+io.on('connection', (socket) => {
+  socket.on('tower:join', (payload = {}) => {
+    const clientId = String(payload.clientId || socket.id);
+    const room = getRoomForClient(clientId);
+    const existingPlayer = room.players.get(clientId);
+    const slot = existingPlayer?.slot ?? getNextOpenSlot(room, clientId);
+    const player =
+      existingPlayer || {
+        clientId,
+        userId: '',
+        nickname: 'Player',
+        position: getSpawnPosition(slot),
+        direction: 'front',
+        connected: true,
+        disconnectedAt: 0,
+        updatedAt: Date.now(),
+        input: { left: false, right: false, airborne: false },
+        rapidUntil: 0,
+        decorations: { ...defaultDecorations },
+        slot,
+        status: room.phase === 'lobby' ? 'ready' : 'waiting',
+        hp: 100,
+        hasSword: false,
+        hasPizza: false,
+        hasWarp: false,
+        frozenUntil: 0,
+        isFat: false,
+        lastSwordAt: 0,
+      };
+
+    player.socketId = socket.id;
+    player.userId = String(payload.userId || player.userId);
+    player.nickname = getUniqueNickname(clientId, payload.nickname || player.nickname);
+    if (payload.decorations) {
+      player.decorations = {
+        ...sanitizeDecorations(payload.decorations, player.decorations || defaultDecorations),
+        updatedBy: player.nickname,
+      };
+    }
+    player.connected = true;
+    player.disconnectedAt = 0;
+    player.input = { left: false, right: false, airborne: false };
+    player.slot = slot;
+    if (room.phase === 'lobby') {
+      player.status = 'ready';
+      player.position = getSpawnPosition(slot);
+    } else if (player.status !== 'alive') {
+      player.status = 'waiting';
+    }
+    player.updatedAt = Date.now();
+    room.players.set(clientId, player);
+    clientRooms.set(clientId, room.id);
+
+    socket.data.clientId = clientId;
+    socket.data.roomId = room.id;
+    socket.join(room.id);
+    if (getRoomSocketCount(room) === 1) {
+      const now = Date.now();
+      room.phase = 'lobby';
+      room.roundStartedAt = now;
+      room.lobbyEndsAt = now + lobbyDurationMs;
+      room.nextEventAt = room.lobbyEndsAt;
+      room.winnerId = '';
+      room.winnerName = '';
+      room.currentEvent = {
+        id: `waiting-${room.id}-${now}`,
+        message: 'Waiting for next round...',
+        selectedAt: now,
+        slot: room.eventSlot,
+      };
+    }
+    socket.emit('tower:joined', { selfId: clientId, roomId: room.id, snapshot: snapshot(room) });
+    broadcastSnapshot(room);
+  });
+
+  socket.on('tower:input', (input = {}) => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+    if (!player) return;
+
+    player.input = {
+      left: Boolean(input.left),
+      right: Boolean(input.right),
+      airborne: Boolean(input.airborne),
+    };
+  });
+
+  socket.on('tower:decoration', (nextDecorations = {}) => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+
+    if (player) {
+      player.decorations = {
+        ...sanitizeDecorations(nextDecorations, player.decorations || defaultDecorations),
+        updatedBy: player.nickname,
+      };
+    }
+    broadcastSnapshot(room);
+  });
+
+  socket.on('tower:die', () => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+    if (!player || player.status !== 'alive') return;
+
+    player.status = 'waiting';
+    player.input = { left: false, right: false, airborne: false };
+    player.updatedAt = Date.now();
+    broadcastSnapshot(room);
+    checkRoundEnd(room);
+  });
+
+  socket.on('tower:warp', (payload = {}) => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+    const target = room.players.get(String(payload.targetClientId || ''));
+    if (!player || !target || !player.hasWarp || player.status !== 'alive' || target.status !== 'alive') return;
+
+    player.position = { ...target.position };
+    player.hasWarp = false;
+    player.updatedAt = Date.now();
+    broadcastSnapshot(room);
+  });
+
+  socket.on('tower:sword', () => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+    if (!player || !player.hasSword || player.status !== 'alive') return;
+
+    const now = Date.now();
+    if (now - (player.lastSwordAt || 0) < swordCooldownMs) return;
+    player.lastSwordAt = now;
+
+    const target = getAlivePlayers(room)
+      .filter((nextPlayer) => nextPlayer.clientId !== clientId)
+      .map((nextPlayer) => ({
+        player: nextPlayer,
+        distance: Math.hypot(nextPlayer.position.x - player.position.x, nextPlayer.position.y - player.position.y),
+      }))
+      .filter(({ distance }) => distance <= swordRange)
+      .sort((a, b) => a.distance - b.distance)[0]?.player;
+
+    if (!target) {
+      broadcastSnapshot(room);
+      return;
+    }
+
+    damagePlayer(target, swordDamage, room);
+    broadcastSnapshot(room);
+  });
+
+  socket.on('tower:leave', (ack) => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) {
+      if (typeof ack === 'function') ack();
+      return;
+    }
+
+    socket.leave(room.id);
+    socket.data.roomId = undefined;
+    socket.data.clientId = undefined;
+    removePlayerFromRoom(room, clientId);
+    if (typeof ack === 'function') ack();
+  });
+
+  socket.on('disconnect', () => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+    if (!player) return;
+
+    player.connected = false;
+    player.disconnectedAt = Date.now();
+    player.input = { left: false, right: false, airborne: false };
+    if (player.status !== 'alive') player.status = 'waiting';
+    player.updatedAt = Date.now();
+    if (!roomHasSockets(room)) pauseEmptyRoom(room);
+    broadcastSnapshot(room);
+    checkRoundEnd(room);
+  });
+});
+
+setInterval(() => {
+  for (const room of rooms.values()) {
+    if (!roomHasSockets(room)) {
+      pauseEmptyRoom(room);
+      continue;
+    }
+    if (room.phase !== 'arena') continue;
+
+    updateTimedTowerEffects(room);
+    for (const player of room.players.values()) applyMovement(room, player);
+    broadcastSnapshot(room);
+  }
+}, movementTickMs);
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const room of rooms.values()) {
+    if (!roomHasSockets(room)) {
+      pauseEmptyRoom(room, now);
+      continue;
+    }
+
+    if (room.phase === 'lobby' && now >= room.lobbyEndsAt) {
+      startRound(room, now);
+      continue;
+    }
+
+    if (room.phase === 'arena' && now >= room.nextEventAt) chooseServerEvent(room);
+  }
+}, 250);
+
+setInterval(pruneRooms, 5000);
+
+httpServer.listen(port, () => {
+  console.log(`Socket.IO tower server listening on http://localhost:${port}`);
+});

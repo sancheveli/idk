@@ -1,11 +1,20 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import {
+  createTerrifyingToweringSocket,
+  type TowerDecorationState,
+  type TowerRemotePlayer,
+  type TowerServerEvent,
+  type TowerSnapshot,
+  type TowerSocket,
+} from '../lib/terrifyingToweringSocket';
 
 type LobbyProps = {
-  nickname: string;
-  userId: string;
+  nickname?: string;
+  userId?: string;
   onMenuOpenChange?: (open: boolean) => void;
   onSignOut?: () => void;
+  onSignInRequest?: () => void;
 };
 
 type Position = {
@@ -162,7 +171,7 @@ type SavedLobbyRunV1 = {
   zombies: Zombie[];
   zombieKing: Zombie | null;
   kingZombies: Zombie[];
-  equippedItem: 'sword' | 'gun';
+  equippedItem: 'sword' | 'gun' | 'pizza' | 'warp';
   bots: BotSnapshot[];
   arenaMode: ArenaMode;
   duelState: DuelState | null;
@@ -190,7 +199,14 @@ const baseStep = 14;
 const rapidStep = 24;
 const worldWidth = 1155;
 const worldHeight = 635;
-const terrifyingToweringPlatformSize = 200;
+const terrifyingToweringJumpDistance = 90;
+const terrifyingToweringAirStep = 32;
+const terrifyingToweringTowerScreenOffsets = [-450, -225, 0, 225, 450];
+const terrifyingToweringLoweredOffset = 74;
+const terrifyingToweringTowerEdgeInset = 10;
+const towerEditorPreviewHeight = 220;
+const towerEditorRoofWidth = 150;
+const towerEditorRoofTop = 18;
 const lobbyDuration = 20;
 const eventInterval = 7;
 const postDoomsdayEventDelay = 20;
@@ -249,6 +265,18 @@ const serverAnnouncements: ServerEvent[] = [
   'Someone will turn red',
   'Someone will turn green',
 ];
+const defaultTowerDecorations: TowerDecorationState = {
+  roofColor: '#facc15',
+  bodyColor: '#ef4444',
+  windowColor: '#bae6fd',
+  updatedBy: 'server',
+  updatedAt: 0,
+};
+const towerDecorationPalettes = {
+  roofColor: ['#facc15', '#38bdf8', '#f97316', '#a3e635'],
+  bodyColor: ['#22c55e', '#ef4444', '#2563eb', '#facc15'],
+  windowColor: ['#bae6fd', '#fef3c7', '#dcfce7', '#fce7f3'],
+} satisfies Record<keyof Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor'>, string[]>;
 const explosiveObjects = ['fort-red', 'fort-blue', 'column-one', 'column-two', 'column-three', 'arena-tree-two', 'arena-tree-three', 'arena-tree-four'];
 const fireDuration = 12000;
 const fireDamage = 30;
@@ -343,6 +371,38 @@ function getGlobalMenuSettingsStorageKey() {
   return 'brickbattle-menu-settings';
 }
 
+function getTowerDecorationsStorageKey(clientId: string) {
+  return `terrifying-towering-decorations:${clientId}`;
+}
+
+function sanitizeTowerDecorations(value: Partial<TowerDecorationState> | null | undefined, fallback: TowerDecorationState = defaultTowerDecorations): TowerDecorationState {
+  return {
+    roofColor: String(value?.roofColor || fallback.roofColor).slice(0, 24),
+    bodyColor: String(value?.bodyColor || fallback.bodyColor).slice(0, 24),
+    windowColor: String(value?.windowColor || fallback.windowColor).slice(0, 24),
+    updatedBy: String(value?.updatedBy || fallback.updatedBy || 'player').slice(0, 32),
+    updatedAt: Number(value?.updatedAt || Date.now()),
+  };
+}
+
+function readSavedTowerDecorations(clientId: string): TowerDecorationState {
+  try {
+    const rawDecorations = window.localStorage.getItem(getTowerDecorationsStorageKey(clientId));
+    if (!rawDecorations) return defaultTowerDecorations;
+    return sanitizeTowerDecorations(JSON.parse(rawDecorations) as Partial<TowerDecorationState>);
+  } catch {
+    return defaultTowerDecorations;
+  }
+}
+
+function writeSavedTowerDecorations(clientId: string, decorations: TowerDecorationState) {
+  try {
+    window.localStorage.setItem(getTowerDecorationsStorageKey(clientId), JSON.stringify(sanitizeTowerDecorations(decorations)));
+  } catch {
+    // Ignore storage failures so tower editing still works for this session.
+  }
+}
+
 function getDefaultGamemods(): GamemodsState {
   return {
     afk: false,
@@ -361,6 +421,52 @@ function sanitizeGamemods(value: Partial<GamemodsState> | null | undefined): Gam
   }
 
   return getDefaultGamemods();
+}
+
+function getPlayerDisplayName(name: string) {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return 'Player';
+  if (trimmed.length > 15 || isInappropriateUsername(trimmed)) return 'Noob';
+  return trimmed;
+}
+
+function normalizeUsernameForModeration(name: string) {
+  return name
+    .toLowerCase()
+    .replace(/[@]/g, 'a')
+    .replace(/[1!|]/g, 'i')
+    .replace(/[0]/g, 'o')
+    .replace(/[3]/g, 'e')
+    .replace(/[4]/g, 'a')
+    .replace(/[5$]/g, 's')
+    .replace(/[7]/g, 't')
+    .replace(/[^a-z]/g, '');
+}
+
+function isInappropriateUsername(name: string) {
+  const normalizedName = normalizeUsernameForModeration(name);
+  const blockedWords = [
+    'asshole',
+    'bastard',
+    'bitch',
+    'cunt',
+    'dick',
+    'fag',
+    'fuck',
+    'hitler',
+    'kike',
+    'nazi',
+    'nigger',
+    'nigga',
+    'penis',
+    'pussy',
+    'retard',
+    'shit',
+    'slut',
+    'whore',
+  ];
+
+  return blockedWords.some((word) => normalizedName.includes(word));
 }
 
 function readSavedGamemods(clientId: string): GamemodsState {
@@ -1182,12 +1288,14 @@ function PlayerAvatar({
   isLocal,
   equippedItem = 'sword',
   positionUnit = 'px',
+  className = '',
 }: {
   player: PlayerSnapshot;
   position: Position;
   isLocal?: boolean;
-  equippedItem?: 'sword' | 'gun';
+  equippedItem?: 'sword' | 'gun' | 'pizza' | 'warp';
   positionUnit?: 'px' | '%';
+  className?: string;
 }) {
   if (player.phase === 'arena' && player.isDead) return null;
 
@@ -1197,7 +1305,7 @@ function PlayerAvatar({
         player.isBlue ? 'blue-player' : ''
       } ${player.isRed ? 'red-player' : ''} ${player.isGreen ? 'green-player' : ''} ${
         player.isFrozen ? 'frozen-player' : ''
-      } ${player.missingRightLeg ? 'missing-right-leg' : ''}`}
+      } ${player.missingRightLeg ? 'missing-right-leg' : ''} ${className}`}
       style={{ left: `${position.x}${positionUnit}`, top: `${position.y}${positionUnit}` }}
     >
       <div className="nameplate">{player.nickname}</div>
@@ -1225,6 +1333,8 @@ function PlayerAvatar({
             <span className="sword-handle" />
           </button>
         )}
+        {player.phase === 'arena' && equippedItem === 'pizza' && <span className="tower-pizza-item" aria-hidden="true" />}
+        {player.phase === 'arena' && equippedItem === 'warp' && <span className="tower-warp-tool" aria-hidden="true" />}
         {player.phase === 'arena' && equippedItem === 'gun' && (
           <span className="classic-gun" aria-hidden="true">
             <span className="gun-sight" />
@@ -1305,8 +1415,9 @@ function ZombieAvatar({ zombie, position, isTargeted }: { zombie?: Zombie; posit
   );
 }
 
-export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyProps) {
-  const clientId = useMemo(() => getClientId(userId), [userId]);
+export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut, onSignInRequest }: LobbyProps) {
+  const isAuthenticated = Boolean(userId);
+  const clientId = useMemo(() => (userId ? getClientId(userId) : 'guest-menu'), [userId]);
   const joinedAtRef = useRef(Date.now());
   const [phase, setPhase] = useState<GamePhase>('lobby');
   const [menuOpen, setMenuOpen] = useState(true);
@@ -1315,6 +1426,10 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   const [timeLeft, setTimeLeft] = useState(lobbyDuration);
   const [roundEndsAt, setRoundEndsAt] = useState(() => Date.now() + lobbyDuration * 1000);
   const [position, setPosition] = useState<Position>(lobbySpawnSlots[0]);
+  const [towerJumpOffset, setTowerJumpOffset] = useState(0);
+  const [towerJumpFalling, setTowerJumpFalling] = useState(false);
+  const [towerVoidFalling, setTowerVoidFalling] = useState(false);
+  const [towerVoidFallOffset, setTowerVoidFallOffset] = useState(0);
   const [direction, setDirection] = useState<Direction>('front');
   const [shopOpen, setShopOpen] = useState(false);
   const [shopDismissed, setShopDismissed] = useState(false);
@@ -1333,7 +1448,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   const [zombies, setZombies] = useState<Zombie[]>([]);
   const [zombieKing, setZombieKing] = useState<Zombie | null>(null);
   const [kingZombies, setKingZombies] = useState<Zombie[]>([]);
-  const [equippedItem, setEquippedItem] = useState<'sword' | 'gun'>('sword');
+  const [equippedItem, setEquippedItem] = useState<'sword' | 'gun' | 'pizza' | 'warp'>('sword');
   const [bots, setBots] = useState<BotSnapshot[]>(() => createInitialBots(Date.now()));
   const [arenaMode, setArenaMode] = useState<ArenaMode>('main');
   const [duelState, setDuelState] = useState<DuelState | null>(null);
@@ -1361,6 +1476,27 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   const [musicRetryKey, setMusicRetryKey] = useState(0);
   const [arenaMusicIndex, setArenaMusicIndex] = useState(0);
   const [targetedZombieId, setTargetedZombieId] = useState<string | null>(null);
+  const [towerRemotePlayers, setTowerRemotePlayers] = useState<TowerRemotePlayer[]>([]);
+  const [towerDecorations, setTowerDecorations] = useState<TowerDecorationState>(() => readSavedTowerDecorations(clientId));
+  const [towerServerEvent, setTowerServerEvent] = useState<TowerServerEvent | null>(null);
+  const [towerConnected, setTowerConnected] = useState(false);
+  const [towerRoomId, setTowerRoomId] = useState('');
+  const [towerMaxPlayers, setTowerMaxPlayers] = useState(5);
+  const [towerAssignedNickname, setTowerAssignedNickname] = useState('');
+  const [towerWinMessage, setTowerWinMessage] = useState('');
+  const [towerColorPickerOpen, setTowerColorPickerOpen] = useState(false);
+  const [towerWaitingForRound, setTowerWaitingForRound] = useState(false);
+  const [towerEffects, setTowerEffects] = useState<TowerSnapshot['effects']>({
+    loweredTowers: [],
+    hiddenTowers: [],
+    bombs: [],
+    explosions: [],
+    doomsdayStrikes: [],
+    missiles: [],
+  });
+  const [towerItems, setTowerItems] = useState({ hasSword: false, hasPizza: false, hasWarp: false, hp: 100, frozenUntil: 0, isFat: false });
+  const [frameScale, setFrameScale] = useState({ x: 1, y: 1 });
+  const [clockNow, setClockNow] = useState(Date.now());
   const pressedKeys = useRef(new Set<string>());
   const frameRef = useRef<HTMLDivElement | null>(null);
   const menuMusicRef = useRef<HTMLAudioElement | null>(null);
@@ -1369,6 +1505,15 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   const arenaSecondMusicRef = useRef<HTMLAudioElement | null>(null);
   const lobbyMusicEnabledRef = useRef(false);
   const swordTimerRef = useRef<number | null>(null);
+  const towerJumpTimerRef = useRef<number | null>(null);
+  const towerFallTimerRef = useRef<number | null>(null);
+  const towerVoidFallTimerRef = useRef<number | null>(null);
+  const towerSocketRef = useRef<TowerSocket | null>(null);
+  const towerInputRef = useRef({ left: false, right: false, airborne: false });
+  const towerDecorationsRef = useRef(towerDecorations);
+  const towerServerClockOffsetRef = useRef(0);
+  const towerVoidFallingRef = useRef(towerVoidFalling);
+  const towerAirborneRef = useRef(towerJumpOffset > 0 || towerJumpFalling);
   const swordSwingStartedAtRef = useRef(0);
   const playerSnapshotRef = useRef<PlayerSnapshot | null>(null);
   const positionRef = useRef(position);
@@ -1410,17 +1555,18 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   });
   const movementStep = isRapid && phase === 'arena' ? rapidStep : baseStep;
   const playerInActiveDuel = Boolean(duelState?.fighters.includes(clientId));
-  const gameStopped = menuOpen || isPaused;
-  const canMove = !gameStopped && !isDead && !isFrozen && (phase === 'lobby' || arenaMode === 'main' || playerInActiveDuel);
+  const towerPauseDisabled = phase === 'arena' && terrifyingToweringActive;
+  const gameStopped = menuOpen || (isPaused && !towerPauseDisabled);
+  const towerFrozen = terrifyingToweringActive && towerItems.frozenUntil > clockNow;
+  const canMove = !gameStopped && !isDead && !isFrozen && !towerFrozen && !towerVoidFalling && (phase === 'lobby' || arenaMode === 'main' || playerInActiveDuel);
 
   const displayName = useMemo(() => {
-    const trimmed = (customNickname || nickname).trim();
-    return trimmed.length > 0 ? trimmed : 'Player';
+    return getPlayerDisplayName(customNickname || nickname);
   }, [customNickname, nickname]);
   const playerSnapshot = useMemo<PlayerSnapshot>(
     () => ({
       clientId,
-      userId,
+      userId: userId ?? '',
       nickname: displayName,
       joinedAt: joinedAtRef.current,
       position,
@@ -1457,6 +1603,113 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   );
   const roomPlayerIds = useMemo(() => [clientId, ...botIds], [clientId]);
   const roomPlayerIdsRef = useRef(roomPlayerIds);
+
+  function applyTowerSnapshot(snapshot: TowerSnapshot) {
+    setTowerRoomId(snapshot.roomId);
+    setTowerMaxPlayers(snapshot.maxPlayers);
+    setTowerRemotePlayers(snapshot.players);
+    setTowerServerEvent(snapshot.currentEvent);
+    setTowerEffects(snapshot.effects);
+    towerServerClockOffsetRef.current = snapshot.serverTime - Date.now();
+    setServerAnnouncement(snapshot.currentEvent.message);
+
+    const authoritativeSelf = snapshot.players.find((player) => player.clientId === clientId);
+    if (authoritativeSelf?.decorations) {
+      const nextDecorations = sanitizeTowerDecorations(authoritativeSelf.decorations, towerDecorationsRef.current);
+      setTowerDecorations(nextDecorations);
+      writeSavedTowerDecorations(clientId, nextDecorations);
+    }
+    setTowerAssignedNickname(authoritativeSelf?.nickname ?? '');
+    setTowerItems({
+      hasSword: Boolean(authoritativeSelf?.hasSword),
+      hasPizza: Boolean(authoritativeSelf?.hasPizza),
+      hasWarp: Boolean(authoritativeSelf?.hasWarp),
+      hp: authoritativeSelf?.hp ?? 100,
+      frozenUntil: authoritativeSelf?.frozenUntil ?? 0,
+      isFat: Boolean(authoritativeSelf?.isFat),
+    });
+    const nextTowerPhase: GamePhase = snapshot.phase === 'arena' && authoritativeSelf?.status === 'alive' ? 'arena' : 'lobby';
+    const waitingForActiveRound = snapshot.phase === 'arena' && authoritativeSelf?.status !== 'alive';
+    setTowerWaitingForRound(waitingForActiveRound);
+    setTimeLeft(waitingForActiveRound ? 0 : Math.max(0, Math.ceil((snapshot.nextEventAt - snapshot.serverTime) / 1000)));
+    setRoundEndsAt(waitingForActiveRound ? Date.now() : snapshot.nextEventAt);
+    setPhase(nextTowerPhase);
+    setTowerWinMessage(snapshot.phase === 'lobby' && snapshot.winnerId === clientId ? 'YOU WIN' : '');
+    if (authoritativeSelf && nextTowerPhase === 'arena' && !towerVoidFallingRef.current && !towerAirborneRef.current) {
+      setPosition(authoritativeSelf.position);
+      setDirection(authoritativeSelf.direction);
+    }
+  }
+
+  useEffect(() => {
+    if (!isAuthenticated || !userId || !terrifyingToweringActive || menuOpen) {
+      towerSocketRef.current?.disconnect();
+      setTowerConnected(false);
+      setTowerRemotePlayers([]);
+      setTowerRoomId('');
+      setTowerAssignedNickname('');
+      setTowerWinMessage('');
+      setTowerWaitingForRound(false);
+      setTowerEffects({ loweredTowers: [], hiddenTowers: [], bombs: [], explosions: [], doomsdayStrikes: [], missiles: [] });
+      setTowerItems({ hasSword: false, hasPizza: false, hasWarp: false, hp: 100, frozenUntil: 0, isFat: false });
+      towerInputRef.current = { left: false, right: false, airborne: false };
+      return;
+    }
+
+    const joinedUserId = userId;
+    const socket = towerSocketRef.current ?? createTerrifyingToweringSocket();
+    towerSocketRef.current = socket;
+
+    function joinTowerRoom() {
+      const currentDecorations = towerDecorationsRef.current;
+      socket.emit('tower:join', {
+        clientId,
+        userId: joinedUserId,
+        nickname: displayName,
+        decorations: {
+          roofColor: currentDecorations.roofColor,
+          bodyColor: currentDecorations.bodyColor,
+          windowColor: currentDecorations.windowColor,
+        },
+      });
+    }
+
+    socket.on('connect', () => {
+      setTowerConnected(true);
+      joinTowerRoom();
+    });
+    socket.on('disconnect', () => {
+      setTowerConnected(false);
+    });
+    socket.on('tower:joined', ({ snapshot }) => applyTowerSnapshot(snapshot));
+    socket.on('tower:snapshot', applyTowerSnapshot);
+    socket.on('tower:event', (event) => {
+      setTowerServerEvent(event);
+      setServerAnnouncement(event.message);
+    });
+    socket.on('tower:decoration', (decorations) => {
+      const nextDecorations = sanitizeTowerDecorations(decorations, towerDecorationsRef.current);
+      setTowerDecorations(nextDecorations);
+      writeSavedTowerDecorations(clientId, nextDecorations);
+    });
+
+    if (socket.connected) {
+      setTowerConnected(true);
+      joinTowerRoom();
+    } else {
+      socket.connect();
+    }
+
+    return () => {
+      socket.off('connect');
+      socket.off('disconnect');
+      socket.off('tower:joined');
+      socket.off('tower:snapshot');
+      socket.off('tower:event');
+      socket.off('tower:decoration');
+      socket.emit('tower:input', { left: false, right: false, airborne: false });
+    };
+  }, [clientId, displayName, isAuthenticated, menuOpen, terrifyingToweringActive, userId]);
 
   useEffect(() => {
     const savedRun = readSavedLobbyRun(clientId);
@@ -1589,6 +1842,18 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   }, [position]);
 
   useEffect(() => {
+    towerVoidFallingRef.current = towerVoidFalling;
+  }, [towerVoidFalling]);
+
+  useEffect(() => {
+    towerDecorationsRef.current = towerDecorations;
+  }, [towerDecorations]);
+
+  useEffect(() => {
+    towerAirborneRef.current = towerJumpOffset > 0 || towerJumpFalling;
+  }, [towerJumpFalling, towerJumpOffset]);
+
+  useEffect(() => {
     botsRef.current = bots;
   }, [bots]);
 
@@ -1627,6 +1892,36 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   useEffect(() => {
     onMenuOpenChange?.(menuOpen);
   }, [menuOpen, onMenuOpenChange]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+
+    function updateFrameScale() {
+      const currentFrame = frameRef.current;
+      const width = currentFrame?.clientWidth || worldWidth;
+      const height = currentFrame?.clientHeight || worldHeight;
+      setFrameScale({
+        x: width / worldWidth,
+        y: height / worldHeight,
+      });
+    }
+
+    updateFrameScale();
+    const observer = new ResizeObserver(updateFrameScale);
+    observer.observe(frame);
+    window.addEventListener('resize', updateFrameScale);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateFrameScale);
+    };
+  }, [menuOpen, phase]);
 
   useEffect(() => {
     writeSavedGamemods(clientId, gamemods);
@@ -1985,7 +2280,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   function renamePlayer() {
     const nextName = window.prompt('Rename your player', displayName)?.trim();
     if (!nextName) return;
-    setCustomNickname(nextName.slice(0, 24));
+    setCustomNickname(getPlayerDisplayName(nextName));
   }
 
   function getAiGameContext() {
@@ -2004,6 +2299,11 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
 
   async function askGameAi(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!isAuthenticated) {
+      onSignInRequest?.();
+      return;
+    }
+
     const question = aiPrompt.trim();
     if (!question || aiLoading) return;
 
@@ -2442,6 +2742,11 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   }
 
   function startFromMenu() {
+    if (!isAuthenticated) {
+      onSignInRequest?.();
+      return;
+    }
+
     const now = Date.now();
     clearSavedLobbyRun(clientId);
     setRunRandomSeed(createRunRandomSeed());
@@ -2451,12 +2756,30 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
     lobbyMusicEnabledRef.current = musicEnabled;
     setIsPaused(false);
     pauseStartedAtRef.current = 0;
-    playCurrentMusic(false, 'lobby', false);
+    const nextPhase: GamePhase = 'lobby';
+    playCurrentMusic(false, nextPhase, false);
     setMenuOpen(false);
     setMenuPanel('main');
+    setPhase(nextPhase);
     setRoomStartedAt(now);
+    setTimeLeft(lobbyDuration);
     setRoundEndsAt(now + lobbyDuration * 1000);
     setRoundSeed((current) => current + 1);
+    setSpawnPlaced(true);
+    setPosition(getSpawnPosition(nextPhase, clientId, roomPlayerIdsRef.current));
+    setDirection('front');
+    setTowerJumpOffset(0);
+    setTowerJumpFalling(false);
+    setTowerVoidFalling(false);
+    setTowerVoidFallOffset(0);
+    setTowerWinMessage('');
+    setBots(terrifyingToweringActive ? [] : createInitialBots(now));
+    gameStateRef.current = {
+      phase: nextPhase,
+      roundEndsAt: now + lobbyDuration * 1000,
+      hiddenArenaObjects: [],
+      serverAnnouncement: '',
+    };
   }
 
   function leaveArenaToLobby() {
@@ -2484,6 +2807,39 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
       hiddenArenaObjects: [],
       serverAnnouncement: '',
     };
+  }
+
+  function leaveTowerToMenu() {
+    if (phase !== 'arena' || !terrifyingToweringActive) return;
+    const socket = towerSocketRef.current;
+
+    pressedKeys.current.clear();
+    stopTowerInput();
+    socket?.emit('tower:leave', () => {
+      socket.disconnect();
+    });
+    clearSavedLobbyRun(clientId);
+    clearArenaCombatState();
+    setTowerRemotePlayers([]);
+    setTowerRoomId('');
+    setTowerServerEvent(null);
+    setTowerConnected(false);
+    setTowerAssignedNickname('');
+    setTowerWinMessage('');
+    setTowerWaitingForRound(false);
+    setTowerJumpOffset(0);
+    setTowerJumpFalling(false);
+    setTowerVoidFalling(false);
+    setTowerVoidFallOffset(0);
+    setPhase('lobby');
+    setMenuPanel('main');
+    setMenuOpen(true);
+    setIsPaused(false);
+    setTimeLeft(lobbyDuration);
+    setRoundEndsAt(Date.now() + lobbyDuration * 1000);
+    setPosition(getSpawnPosition('lobby', clientId, roomPlayerIdsRef.current));
+    setDirection('front');
+    playCurrentMusic(true, 'lobby', true);
   }
 
   function shiftPausedDeadlines(pauseDuration: number) {
@@ -2548,6 +2904,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
 
   function togglePause() {
     if (phase !== 'arena') return;
+    if (terrifyingToweringActive) return;
     pressedKeys.current.clear();
 
     if (!isPaused) {
@@ -2566,6 +2923,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
 
   useEffect(() => {
     if (gameStopped) return;
+    if (terrifyingToweringActive) return;
     if (afkModeActive && phase === 'lobby') {
       return;
     }
@@ -3069,11 +3427,31 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
       return;
     }
 
-    const movementKeys = ['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd', 'keyw', 'keya', 'keys', 'keyd'];
+    const movementKeys = [
+      'arrowup',
+      'arrowdown',
+      'arrowleft',
+      'arrowright',
+      'w',
+      'a',
+      's',
+      'd',
+      'keyw',
+      'keya',
+      'keys',
+      'keyd',
+      ...(terrifyingToweringActive ? [' ', 'space', 'spacebar'] : []),
+    ];
 
     function onKeyDown(event: KeyboardEvent) {
       const key = event.key.toLowerCase();
       const code = event.code.toLowerCase();
+      if (phase === 'arena' && terrifyingToweringActive && (key === ' ' || key === 'spacebar' || code === 'space')) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
       if (movementKeys.includes(key) || movementKeys.includes(code)) {
         event.preventDefault();
         pressedKeys.current.add(key);
@@ -3093,16 +3471,51 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
       const keys = pressedKeys.current;
       let dx = 0;
       let dy = 0;
+      const towerAirborne = phase === 'arena' && terrifyingToweringActive && (towerJumpOffset > 0 || towerJumpFalling);
+      const activeMovementStep = towerAirborne ? terrifyingToweringAirStep : movementStep;
 
-      if (keys.has('arrowup') || keys.has('w') || keys.has('keyw')) dy -= movementStep;
-      if (keys.has('arrowdown') || keys.has('s') || keys.has('keys')) dy += movementStep;
-      if (keys.has('arrowleft') || keys.has('a') || keys.has('keya')) dx -= movementStep;
-      if (keys.has('arrowright') || keys.has('d') || keys.has('keyd')) dx += movementStep;
+      if (keys.has('arrowup') || keys.has('w') || keys.has('keyw')) dy -= activeMovementStep;
+      if (keys.has('arrowdown') || keys.has('s') || keys.has('keys')) dy += activeMovementStep;
+      if (keys.has('arrowleft') || keys.has('a') || keys.has('keya')) dx -= activeMovementStep;
+      if (keys.has('arrowright') || keys.has('d') || keys.has('keyd')) dx += activeMovementStep;
+      if (terrifyingToweringActive && phase === 'arena') dy = 0;
 
-      if (dx === 0 && dy === 0) return;
       if (!canMove) return;
 
+      if (phase === 'arena' && terrifyingToweringActive) {
+        if (dx === 0) {
+          stopTowerInput();
+          return;
+        }
+
+        setDirection(dx > 0 ? 'right' : 'left');
+        let shouldFallIntoVoid = false;
+        setPosition((current) => {
+          const bounds = getWorldMovementBounds();
+          const next = {
+            x: clamp(current.x + dx, bounds.minX, bounds.maxX),
+            y: clamp(current.y, bounds.minY, bounds.maxY),
+          };
+
+          if (!towerAirborne && !isOnTerrifyingToweringPlatform(next)) {
+            return current;
+          }
+
+          return next;
+        });
+        updateTowerInput({
+          left: dx < 0,
+          right: dx > 0,
+          airborne: towerAirborne,
+        });
+        if (shouldFallIntoVoid) triggerTowerVoidFall();
+        return;
+      }
+
+      if (dx === 0 && dy === 0) return;
+
       setDirection(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'front' : 'back');
+      let shouldFallIntoVoid = false;
       setPosition((current) => {
         const bounds = getWorldMovementBounds();
         const next = {
@@ -3110,8 +3523,13 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
           y: clamp(current.y + dy, bounds.minY, bounds.maxY),
         };
 
+        if (phase === 'arena' && terrifyingToweringActive && !towerAirborne && !isOnTerrifyingToweringPlatform(next)) {
+          return current;
+        }
+
         return collidesWithObstacle(next) || collidesWithPlayer(next) ? current : next;
       });
+      if (shouldFallIntoVoid) triggerTowerVoidFall();
     }, 80);
 
     return () => {
@@ -3119,12 +3537,77 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
       window.removeEventListener('keyup', onKeyUp);
       window.clearInterval(timer);
       if (swordTimerRef.current) window.clearTimeout(swordTimerRef.current);
+      if (phase === 'arena' && terrifyingToweringActive) stopTowerInput();
     };
-  }, [canMove, gameStopped, hiddenArenaObjects, movementStep, phase, terrifyingToweringActive]);
+  }, [canMove, gameStopped, hiddenArenaObjects, movementStep, phase, terrifyingToweringActive, towerJumpFalling, towerJumpOffset]);
 
   useEffect(() => {
-    if (isFrozen) pressedKeys.current.clear();
-  }, [isFrozen]);
+    function preventTowerSpaceScroll(event: KeyboardEvent) {
+      if (phase !== 'arena' || !terrifyingToweringActive) return;
+      if (event.key !== ' ' && event.key.toLowerCase() !== 'spacebar' && event.code.toLowerCase() !== 'space') return;
+      event.preventDefault();
+      if (!event.repeat) triggerTowerJump();
+    }
+
+    window.addEventListener('keydown', preventTowerSpaceScroll, { capture: true });
+
+    return () => {
+      window.removeEventListener('keydown', preventTowerSpaceScroll, { capture: true });
+    };
+  }, [phase, terrifyingToweringActive]);
+
+  useEffect(() => {
+    if (!isFrozen && !gameStopped) return;
+    pressedKeys.current.clear();
+    if (phase === 'arena' && terrifyingToweringActive) stopTowerInput();
+  }, [gameStopped, isFrozen, phase, terrifyingToweringActive]);
+
+  useEffect(() => {
+    if (phase === 'arena' && terrifyingToweringActive) return;
+    setTowerJumpOffset(0);
+    if (towerJumpTimerRef.current) {
+      window.clearTimeout(towerJumpTimerRef.current);
+      towerJumpTimerRef.current = null;
+    }
+    if (towerFallTimerRef.current) {
+      window.clearTimeout(towerFallTimerRef.current);
+      towerFallTimerRef.current = null;
+    }
+    if (towerVoidFallTimerRef.current) {
+      window.clearTimeout(towerVoidFallTimerRef.current);
+      towerVoidFallTimerRef.current = null;
+    }
+    setTowerJumpFalling(false);
+    setTowerVoidFalling(false);
+    setTowerVoidFallOffset(0);
+  }, [phase, terrifyingToweringActive]);
+
+  useEffect(() => {
+    if (phase !== 'arena' || !terrifyingToweringActive || towerVoidFalling || towerJumpOffset > 0 || towerJumpFalling) return;
+    const landing = getTerrifyingToweringLandingAt(positionRef.current);
+    if (!landing) {
+      triggerTowerVoidFall();
+      return;
+    }
+
+    if (Math.abs(positionRef.current.y - landing.y) > 1) {
+      setPosition(landing);
+    }
+  }, [clockNow, phase, terrifyingToweringActive, towerEffects.hiddenTowers, towerEffects.loweredTowers, towerJumpFalling, towerJumpOffset, towerVoidFalling]);
+
+  useEffect(() => {
+    if (phase !== 'arena' || !terrifyingToweringActive || !isPaused) return;
+    pauseStartedAtRef.current = 0;
+    setIsPaused(false);
+  }, [isPaused, phase, terrifyingToweringActive]);
+
+  useEffect(() => {
+    return () => {
+      if (towerJumpTimerRef.current) window.clearTimeout(towerJumpTimerRef.current);
+      if (towerFallTimerRef.current) window.clearTimeout(towerFallTimerRef.current);
+      if (towerVoidFallTimerRef.current) window.clearTimeout(towerVoidFallTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (phase !== 'arena' || equippedItem !== 'gun' || !isZombieKingAlive(zombieKing)) {
@@ -3150,20 +3633,15 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   }, [gameStopped, phase, position, shopDismissed]);
 
   function getFrameScale() {
-    const frame = frameRef.current;
-
-    return {
-      x: (frame?.clientWidth ?? worldWidth) / worldWidth,
-      y: (frame?.clientHeight ?? worldHeight) / worldHeight,
-    };
+    return frameScale;
   }
 
   function worldToScreen(nextPosition: Position) {
-    const scale = getFrameScale();
+    void frameRef.current;
 
     return {
-      x: nextPosition.x * scale.x,
-      y: nextPosition.y * scale.y,
+      x: nextPosition.x,
+      y: nextPosition.y,
     };
   }
 
@@ -3171,40 +3649,106 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
     const scale = getFrameScale();
 
     return {
-      x: screenPosition.x / scale.x,
-      y: screenPosition.y / scale.y,
+      x: screenPosition.x / Math.max(0.0001, scale.x),
+      y: screenPosition.y / Math.max(0.0001, scale.y),
     };
   }
 
   function scaleBoundsToScreen(bounds: Bounds) {
-    const scale = getFrameScale();
+    void frameRef.current;
 
     return {
-      x: bounds.x * scale.x,
-      y: bounds.y * scale.y,
-      width: bounds.width * scale.x,
-      height: bounds.height * scale.y,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
     };
+  }
+
+  function getTerrifyingToweringPlatformWorldBounds(screenOffset = 0) {
+    const centerX = worldWidth / 2 + screenOffset;
+
+    return {
+      left: centerX - towerEditorRoofWidth / 2,
+      right: centerX + towerEditorRoofWidth / 2,
+      top: worldHeight / 2 - towerEditorPreviewHeight / 2 + towerEditorRoofTop,
+      bottom: worldHeight / 2 - towerEditorPreviewHeight / 2 + towerEditorRoofTop + 1,
+    };
+  }
+
+  function hasActiveLoweredTower(slot: number) {
+    const serverNow = clockNow + towerServerClockOffsetRef.current;
+    return towerEffects.loweredTowers.some((effect) => effect.slot === slot && effect.until > serverNow);
+  }
+
+  function hasActiveHiddenTower(slot: number) {
+    const serverNow = clockNow + towerServerClockOffsetRef.current;
+    return towerEffects.hiddenTowers.some((effect) => effect.slot === slot && effect.until > serverNow);
+  }
+
+  function getTerrifyingToweringPlatformWorldBoundsList() {
+    return terrifyingToweringTowerScreenOffsets.map((offset, slot) => {
+      const bounds = getTerrifyingToweringPlatformWorldBounds(offset);
+      const lowered = hasActiveLoweredTower(slot);
+
+      return {
+        ...bounds,
+        slot,
+        top: lowered ? bounds.top + terrifyingToweringLoweredOffset : bounds.top,
+        bottom: lowered ? bounds.bottom + terrifyingToweringLoweredOffset : bounds.bottom,
+        hidden: hasActiveHiddenTower(slot),
+      };
+    });
+  }
+
+  function getTerrifyingToweringLandingY() {
+    return getTerrifyingToweringPlatformWorldBounds().top + 66;
+  }
+
+  function getTerrifyingToweringPlatformLandingY(platform: ReturnType<typeof getTerrifyingToweringPlatformWorldBoundsList>[number]) {
+    return platform.top + 66;
+  }
+
+  function getTerrifyingToweringLandingAt(positionToLand: Position) {
+    const landingPlatform = getTerrifyingToweringPlatformWorldBoundsList().find((platform) => {
+      if (platform.hidden) return false;
+      return positionToLand.x >= platform.left + terrifyingToweringTowerEdgeInset && positionToLand.x <= platform.right - terrifyingToweringTowerEdgeInset;
+    });
+
+    if (!landingPlatform) return null;
+
+    return {
+      x: clamp(positionToLand.x, landingPlatform.left + terrifyingToweringTowerEdgeInset, landingPlatform.right - terrifyingToweringTowerEdgeInset),
+      y: getTerrifyingToweringPlatformLandingY(landingPlatform),
+    };
+  }
+
+  function isOnTerrifyingToweringPlatform(nextPosition: Position) {
+    const landing = getTerrifyingToweringLandingAt(nextPosition);
+
+    return Boolean(landing && Math.abs(nextPosition.y - landing.y) <= 1);
   }
 
   function getWorldMovementBounds() {
     if (phase === 'arena' && terrifyingToweringActive) {
-      const frame = frameRef.current;
-      const frameWidth = frame?.clientWidth ?? worldWidth;
-      const frameHeight = frame?.clientHeight ?? worldHeight;
-      const scale = getFrameScale();
-      const platformWorld = {
-        left: (frameWidth / 2 - terrifyingToweringPlatformSize / 2) / scale.x,
-        right: (frameWidth / 2 + terrifyingToweringPlatformSize / 2) / scale.x,
-        top: (frameHeight / 2 - terrifyingToweringPlatformSize / 2) / scale.y,
-        bottom: (frameHeight / 2 + terrifyingToweringPlatformSize / 2) / scale.y,
-      };
+      const platformWorldBounds = getTerrifyingToweringPlatformWorldBoundsList().filter((platform) => !platform.hidden);
+      const firstPlatform = platformWorldBounds[0];
+      const lastPlatform = platformWorldBounds[platformWorldBounds.length - 1];
+      const landingY = getTerrifyingToweringLandingAt(positionRef.current)?.y ?? getTerrifyingToweringLandingY();
+      if (!firstPlatform || !lastPlatform) {
+        return {
+          minX: positionRef.current.x,
+          maxX: positionRef.current.x,
+          minY: landingY,
+          maxY: landingY,
+        };
+      }
 
       return {
-        minX: platformWorld.left + 23,
-        maxX: platformWorld.right - 23,
-        minY: platformWorld.top + 66,
-        maxY: platformWorld.bottom - 12,
+        minX: firstPlatform.left + terrifyingToweringTowerEdgeInset,
+        maxX: lastPlatform.right - terrifyingToweringTowerEdgeInset,
+        minY: getTerrifyingToweringLandingY(),
+        maxY: getTerrifyingToweringLandingY() + terrifyingToweringLoweredOffset,
       };
     }
 
@@ -3218,9 +3762,11 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
 
   function getSpawnPosition(nextPhase: GamePhase, nextClientId = clientId, clientIds = roomPlayerIdsRef.current) {
     if (nextPhase === 'arena' && terrifyingToweringActive) {
+      const platformWorld = getTerrifyingToweringPlatformWorldBounds();
+
       return {
-        x: worldWidth / 2,
-        y: worldHeight / 2,
+        x: (platformWorld.left + platformWorld.right) / 2,
+        y: getTerrifyingToweringLandingY(),
       };
     }
 
@@ -3342,15 +3888,13 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   }
 
   function getDoomsdayDisplayStrike(strike: DoomsdayStrike) {
-    const scale = getFrameScale();
     const position = worldToScreen(strike);
-    const radiusScale = Math.min(scale.x, scale.y);
 
     return {
       ...strike,
       x: position.x,
       y: position.y,
-      radius: strike.radius * radiusScale,
+      radius: strike.radius,
     };
   }
 
@@ -3413,6 +3957,46 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
     );
   }
 
+  function updateTowerInput(nextInput: { left: boolean; right: boolean; airborne: boolean }) {
+    towerInputRef.current = nextInput;
+    towerSocketRef.current?.emit('tower:input', nextInput);
+  }
+
+  function stopTowerInput() {
+    updateTowerInput({ left: false, right: false, airborne: false });
+  }
+
+  function cycleTowerDecoration(part: keyof typeof towerDecorationPalettes) {
+    const palette = towerDecorationPalettes[part];
+    const currentIndex = palette.indexOf(towerDecorations[part]);
+    const nextDecorations = {
+      roofColor: towerDecorations.roofColor,
+      bodyColor: towerDecorations.bodyColor,
+      windowColor: towerDecorations.windowColor,
+      [part]: palette[(currentIndex + 1) % palette.length],
+    };
+
+    updateTowerDecorations(nextDecorations);
+  }
+
+  function setTowerBodyColor(bodyColor: string) {
+    const nextDecorations = {
+      roofColor: towerDecorations.roofColor,
+      bodyColor,
+      windowColor: towerDecorations.windowColor,
+    };
+
+    updateTowerDecorations(nextDecorations);
+  }
+
+  function updateTowerDecorations(nextDecorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor'>) {
+    const savedDecorations = sanitizeTowerDecorations({ ...towerDecorations, ...nextDecorations, updatedBy: displayName, updatedAt: Date.now() }, towerDecorations);
+    setTowerDecorations(savedDecorations);
+    towerDecorationsRef.current = savedDecorations;
+    writeSavedTowerDecorations(clientId, savedDecorations);
+    towerSocketRef.current?.emit('tower:decoration', nextDecorations);
+  }
+
   function collidesZombieWithFire(zombie: Zombie, hazard: FireHazard) {
     const bounds = getFireBounds(hazard);
     if (!bounds) return false;
@@ -3462,16 +4046,109 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   function move(dx: number, dy: number) {
     if (!canMove) return;
 
-    setDirection(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'front' : 'back');
+    const towerAirMovement = phase === 'arena' && terrifyingToweringActive && (towerJumpOffset > 0 || towerJumpFalling);
+    const towerAirMultiplier = towerAirMovement ? terrifyingToweringAirStep / movementStep : 1;
+    const nextDx = dx * towerAirMultiplier;
+    const nextDy = phase === 'arena' && terrifyingToweringActive ? 0 : dy;
+    if (nextDx === 0 && nextDy === 0) return;
+
+    if (phase === 'arena' && terrifyingToweringActive) {
+      setDirection(nextDx > 0 ? 'right' : 'left');
+      let shouldFallIntoVoid = false;
+      setPosition((current) => {
+        const bounds = getWorldMovementBounds();
+        const next = {
+          x: clamp(current.x + nextDx, bounds.minX, bounds.maxX),
+          y: clamp(current.y, bounds.minY, bounds.maxY),
+        };
+
+        if (!towerAirMovement && !isOnTerrifyingToweringPlatform(next)) {
+          return current;
+        }
+
+        return next;
+      });
+      updateTowerInput({ left: nextDx < 0, right: nextDx > 0, airborne: towerAirMovement });
+      window.setTimeout(stopTowerInput, 120);
+      if (shouldFallIntoVoid) triggerTowerVoidFall();
+      return;
+    }
+
+    setDirection(Math.abs(nextDx) > Math.abs(nextDy) ? (nextDx > 0 ? 'right' : 'left') : nextDy > 0 ? 'front' : 'back');
+    let shouldFallIntoVoid = false;
     setPosition((current) => {
       const bounds = getWorldMovementBounds();
       const next = {
-        x: clamp(current.x + dx, bounds.minX, bounds.maxX),
-        y: clamp(current.y + dy, bounds.minY, bounds.maxY),
+        x: clamp(current.x + nextDx, bounds.minX, bounds.maxX),
+        y: clamp(current.y + nextDy, bounds.minY, bounds.maxY),
       };
+
+      if (phase === 'arena' && terrifyingToweringActive && !towerAirMovement && !isOnTerrifyingToweringPlatform(next)) {
+        return current;
+      }
 
       return collidesWithObstacle(next) || collidesWithPlayer(next) ? current : next;
     });
+    if (shouldFallIntoVoid) triggerTowerVoidFall();
+  }
+
+  function triggerTowerJump() {
+    if (!canMove || phase !== 'arena' || !terrifyingToweringActive) return;
+    if (towerJumpOffset > 0 || towerJumpFalling || towerVoidFalling) return;
+    if (!isOnTerrifyingToweringPlatform(positionRef.current)) return;
+
+    setTowerJumpFalling(false);
+    setTowerVoidFalling(false);
+    setTowerVoidFallOffset(0);
+    setTowerJumpOffset(terrifyingToweringJumpDistance);
+    updateTowerInput({ ...towerInputRef.current, airborne: true });
+    if (towerJumpTimerRef.current) window.clearTimeout(towerJumpTimerRef.current);
+    if (towerFallTimerRef.current) window.clearTimeout(towerFallTimerRef.current);
+    if (towerVoidFallTimerRef.current) window.clearTimeout(towerVoidFallTimerRef.current);
+    towerJumpTimerRef.current = window.setTimeout(() => {
+      setTowerJumpFalling(true);
+      setTowerJumpOffset(0);
+      towerJumpTimerRef.current = null;
+      towerFallTimerRef.current = window.setTimeout(() => {
+        const landing = getTerrifyingToweringLandingAt(positionRef.current);
+        if (landing) {
+          setPosition(landing);
+        } else {
+          triggerTowerVoidFall();
+        }
+        updateTowerInput({ ...towerInputRef.current, airborne: false });
+        setTowerJumpFalling(false);
+        towerFallTimerRef.current = null;
+      }, 560);
+    }, 320);
+  }
+
+  function triggerTowerVoidFall() {
+    pressedKeys.current.clear();
+    stopTowerInput();
+    if (towerJumpTimerRef.current) {
+      window.clearTimeout(towerJumpTimerRef.current);
+      towerJumpTimerRef.current = null;
+    }
+    if (towerFallTimerRef.current) {
+      window.clearTimeout(towerFallTimerRef.current);
+      towerFallTimerRef.current = null;
+    }
+    setTowerJumpOffset(0);
+    setTowerJumpFalling(false);
+    setTowerVoidFalling(true);
+    setTowerVoidFallOffset(frameRef.current?.clientHeight ?? worldHeight);
+
+    if (towerVoidFallTimerRef.current) window.clearTimeout(towerVoidFallTimerRef.current);
+    towerVoidFallTimerRef.current = window.setTimeout(() => {
+      setTowerVoidFalling(false);
+      setTowerVoidFallOffset(0);
+      towerSocketRef.current?.emit('tower:die');
+      setPhase('lobby');
+      setServerAnnouncement('Waiting for next round...');
+      setDirection('front');
+      towerVoidFallTimerRef.current = null;
+    }, 760);
   }
 
   function formatTime(totalSeconds: number) {
@@ -3482,6 +4159,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
 
   function swingSword() {
     if (gameStopped || isDead || isFrozen || (arenaMode === 'duel' && !playerInActiveDuel)) return;
+    if (terrifyingToweringActive && !towerItems.hasSword) return;
 
     setSwordSwinging(false);
     if (swordTimerRef.current) window.clearTimeout(swordTimerRef.current);
@@ -3493,6 +4171,10 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
         setSwordSwinging(false);
       }, 520);
     });
+
+    if (terrifyingToweringActive && phase === 'arena') {
+      towerSocketRef.current?.emit('tower:sword');
+    }
   }
 
   function getGunTargetAtWorld(targetPosition: Position) {
@@ -3513,21 +4195,21 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
       .sort((a, b) => a.distance - b.distance)[0]?.zombie;
   }
 
-  function updateGunTarget(screenPosition: Position) {
+  function updateGunTarget(worldPosition: Position) {
     if (gameStopped) {
       setTargetedZombieId(null);
       return;
     }
 
-    const hitZombie = getGunTargetAtWorld(screenToWorld(screenPosition));
+    const hitZombie = getGunTargetAtWorld(worldPosition);
     setTargetedZombieId(hitZombie?.id ?? null);
   }
 
-  function shootGunAt(screenPosition: Position) {
+  function shootGunAt(worldPosition: Position) {
     const kingAlive = isZombieKingAlive(zombieKing);
     if (gameStopped || phase !== 'arena' || equippedItem !== 'gun' || !kingAlive || !zombieKing || isDead) return;
 
-    const hitZombie = getGunTargetAtWorld(screenToWorld(screenPosition));
+    const hitZombie = getGunTargetAtWorld(worldPosition);
 
     if (!hitZombie) return;
 
@@ -3536,6 +4218,32 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
     } else {
       damageKingZombie(hitZombie.id, gunDamage);
     }
+  }
+
+  function getTowerPlayerDisplayPosition(playerPosition: Position, extraYOffset = 0) {
+    return {
+      x: playerPosition.x,
+      y: playerPosition.y - 66 + extraYOffset,
+    };
+  }
+
+  function getTowerPlayerAtWorld(worldPosition: Position) {
+    return towerRemotePlayers
+      .filter((player) => player.status === 'alive' && player.clientId !== clientId)
+      .map((player) => ({
+        player,
+        displayPosition: getTowerPlayerDisplayPosition(player.position),
+      }))
+      .filter(({ displayPosition }) => {
+        return (
+          worldPosition.x >= displayPosition.x - 34 &&
+          worldPosition.x <= displayPosition.x + 34 &&
+          worldPosition.y >= displayPosition.y - 18 &&
+          worldPosition.y <= displayPosition.y + 88
+        );
+      })
+      .sort((a, b) => Math.hypot(a.displayPosition.x - worldPosition.x, a.displayPosition.y - worldPosition.y) - Math.hypot(b.displayPosition.x - worldPosition.x, b.displayPosition.y - worldPosition.y))[0]
+      ?.player;
   }
 
   const activeFireObjectIds = new Set(fireHazards.map((hazard) => hazard.objectId).filter(Boolean));
@@ -3549,7 +4257,92 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
           })
           .filter((marker): marker is { objectId: string; bounds: Bounds } => Boolean(marker))
       : [];
-  const hasInventoryItems = hasSword || isZombieKingAlive(zombieKing);
+  const hasInventoryItems = terrifyingToweringActive ? towerItems.hasSword || towerItems.hasPizza || towerItems.hasWarp : hasSword || isZombieKingAlive(zombieKing);
+  const displayedServerAnnouncement = phase === 'arena' && terrifyingToweringActive ? towerServerEvent?.message || serverAnnouncement : serverAnnouncement;
+  const displayedTimeLeft =
+    terrifyingToweringActive && Number.isFinite(roundEndsAt)
+      ? Math.max(0, Math.ceil((roundEndsAt - clockNow) / 1000))
+      : timeLeft;
+  const playerScreenPosition = worldToScreen(playerSnapshot.position);
+  const localPlayerDisplayPosition = {
+    ...playerScreenPosition,
+    ...(phase === 'arena' && terrifyingToweringActive ? getTowerPlayerDisplayPosition(playerSnapshot.position, -towerJumpOffset + towerVoidFallOffset) : {}),
+  };
+  const localPlayerSnapshot = {
+    ...playerSnapshot,
+    nickname: phase === 'arena' && terrifyingToweringActive && towerAssignedNickname ? towerAssignedNickname : playerSnapshot.nickname,
+    hasSword: terrifyingToweringActive ? towerItems.hasSword : playerSnapshot.hasSword,
+    health: terrifyingToweringActive ? towerItems.hp : playerSnapshot.health,
+    isFrozen: terrifyingToweringActive ? towerItems.frozenUntil > clockNow : playerSnapshot.isFrozen,
+  };
+  const terrifyingTowerPlacements = ['far-left', 'left', 'center', 'right', 'far-right'] as const;
+  const towerServerNow = clockNow + towerServerClockOffsetRef.current;
+  const loweredTowerSlots = new Set(towerEffects.loweredTowers.filter((effect) => effect.until > towerServerNow).map((effect) => effect.slot));
+  const hiddenTowerSlots = new Set(towerEffects.hiddenTowers.filter((effect) => effect.until > towerServerNow).map((effect) => effect.slot));
+  function getTowerSlotCenter(slot: number) {
+    const bounds = getTerrifyingToweringPlatformWorldBoundsList()[slot] ?? getTerrifyingToweringPlatformWorldBounds();
+
+    return {
+      x: (bounds.left + bounds.right) / 2,
+      y: bounds.top + 28,
+    };
+  }
+  function getTowerMissileTarget(missile: TowerSnapshot['effects']['missiles'][number]) {
+    if (missile.targetClientId === clientId) return localPlayerDisplayPosition;
+
+    const remotePlayer = towerRemotePlayerSnapshots.find((player) => player.clientId === missile.targetClientId);
+    if (!remotePlayer) return null;
+
+    return getTowerPlayerDisplayPosition(remotePlayer.position);
+  }
+  const towerRemotePlayerSnapshots = useMemo<Array<PlayerSnapshot & { hasPizza?: boolean; hasWarp?: boolean; isFat?: boolean }>>(
+    () =>
+      towerRemotePlayers
+        .filter((player) => player.clientId !== clientId && player.status === 'alive')
+        .map((player) => ({
+          clientId: player.clientId,
+          userId: player.userId,
+          nickname: player.connected ? player.nickname : `${player.nickname} reconnecting`,
+          joinedAt: player.updatedAt,
+          position: player.position,
+          direction: player.direction,
+          phase: 'arena',
+          hasSword: player.hasSword,
+          isBlue: !player.connected,
+          isRed: false,
+          isGreen: player.connected,
+          isFrozen: player.frozenUntil > clockNow,
+          missingRightLeg: false,
+          swordSwinging: false,
+          health: player.hp,
+          isDead: false,
+          updatedAt: player.updatedAt,
+          hasPizza: player.hasPizza,
+          hasWarp: player.hasWarp,
+          isFat: player.isFat,
+        })),
+    [clientId, clockNow, towerRemotePlayers],
+  );
+  const towerDecorationStyle = {
+    '--tower-roof-color': towerDecorations.roofColor,
+    '--tower-body-color': towerDecorations.bodyColor,
+    '--tower-window-color': towerDecorations.windowColor,
+  } as CSSProperties;
+  function getTowerDecorationStyleForSlot(slot: number) {
+    const slotPlayer = towerRemotePlayers.find((player) => player.slot === slot);
+    const decorations = sanitizeTowerDecorations(slotPlayer?.decorations, defaultTowerDecorations);
+
+    return {
+      '--tower-roof-color': decorations.roofColor,
+      '--tower-body-color': decorations.bodyColor,
+      '--tower-window-color': decorations.windowColor,
+    } as CSSProperties;
+  }
+  const gameWorldStyle = {
+    width: `${worldWidth}px`,
+    height: `${worldHeight}px`,
+    transform: `scale(${frameScale.x}, ${frameScale.y})`,
+  } as CSSProperties;
   const audioDeck = (
     <>
       <audio ref={menuMusicRef} src={menuMusicSrc} preload="auto" />
@@ -3605,7 +4398,13 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
               </span>{' '}
               cineWHAT?
             </h1>
-            {menuPanel === 'main' ? (
+            {!isAuthenticated ? (
+              <div className="main-menu-buttons" role="group" aria-label="Account actions">
+                <button type="button" onClick={onSignInRequest}>
+                  Sign in
+                </button>
+              </div>
+            ) : menuPanel === 'main' ? (
               <>
                 <div className="main-menu-buttons" role="group" aria-label="Menu actions">
                   <button type="button" onClick={startFromMenu}>
@@ -3697,7 +4496,7 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
                 )}
                 {menuPanel === 'tower-editor' && (
                   <div className="tower-editor-panel" aria-label="Tower editor">
-                    <div className="tower-preview" aria-hidden="true">
+                    <div className="tower-preview" style={towerDecorationStyle} aria-hidden="true">
                       <div className="tower-preview-roof" />
                       <div className="tower-preview-body">
                         <span />
@@ -3707,9 +4506,29 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
                       <div className="tower-preview-base" />
                     </div>
                     <div className="tower-editor-actions" role="group" aria-label="Tower editor actions">
-                      <button type="button">Color</button>
-                      <button type="button">Decorations</button>
-                      <button type="button">Area</button>
+                      <button type="button" onClick={() => setTowerColorPickerOpen((current) => !current)}>
+                        Color
+                      </button>
+                      {towerColorPickerOpen && (
+                        <div className="tower-color-swatches" aria-label="Tower wall colors">
+                          {towerDecorationPalettes.bodyColor.map((color) => (
+                            <button
+                              key={color}
+                              type="button"
+                              className={towerDecorations.bodyColor === color ? 'active' : ''}
+                              aria-label={`Set wall color ${color}`}
+                              style={{ backgroundColor: color }}
+                              onClick={() => setTowerBodyColor(color)}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      <button type="button" onClick={() => cycleTowerDecoration('windowColor')}>
+                        Decorations
+                      </button>
+                      <button type="button" onClick={() => cycleTowerDecoration('roofColor')}>
+                        Area
+                      </button>
                     </div>
                   </div>
                 )}
@@ -3729,25 +4548,38 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
   return (
     <>
       {audioDeck}
-      <section className="lobby">
+      <section className={`lobby ${phase === 'arena' && terrifyingToweringActive ? 'tower-fullscreen' : ''}`}>
       <div className="lobby-topbar">
         <div>
           <p className="eyebrow">Classic lobby</p>
-          <h2>{phase === 'lobby' ? 'Spawn Plaza' : terrifyingToweringActive ? 'Terrifying Towering' : arenaMode === 'duel' ? 'Battle To Death' : 'Brickbattle Arena'}</h2>
+          <h2>{terrifyingToweringActive ? (phase === 'arena' ? 'Terrifying Towering' : 'Tower Lobby') : phase === 'lobby' ? 'Spawn Plaza' : arenaMode === 'duel' ? 'Battle To Death' : 'Brickbattle Arena'}</h2>
+          {phase === 'arena' && terrifyingToweringActive && (
+            <p className="tower-network-status">
+              {towerConnected ? 'Socket online' : 'Reconnecting'} | {towerRemotePlayers.filter((player) => player.connected).length} online
+              {towerRoomId ? ` | ${towerRoomId}` : ''} | max {towerMaxPlayers}
+              {towerWaitingForRound ? ' | waiting for next round' : ''}
+              {towerServerEvent ? ` | ${towerServerEvent.message}` : ''}
+            </p>
+          )}
         </div>
-        {!(phase === 'lobby' && afkModeActive) && (
+        {!(phase === 'lobby' && afkModeActive) && !towerWaitingForRound && (
           <div className="round-info">
-            <p className="round-label">{phase === 'lobby' ? 'Teleporting in' : 'Arena time'}</p>
-            <p className="round-timer">{formatTime(timeLeft)}</p>
+            <p className="round-label">{terrifyingToweringActive ? (phase === 'arena' ? 'Next event' : 'Next round') : phase === 'lobby' ? 'Teleporting in' : 'Arena time'}</p>
+            <p className="round-timer">{formatTime(displayedTimeLeft)}</p>
           </div>
         )}
-        {phase === 'arena' && (
+        {phase === 'arena' && !terrifyingToweringActive && (
           <button type="button" className="pause-toggle" onClick={togglePause}>
             {isPaused ? 'Resume' : 'Pause'}
           </button>
         )}
-        {phase === 'arena' && isPaused && (
+        {phase === 'arena' && !terrifyingToweringActive && isPaused && (
           <button type="button" className="leave-toggle" onClick={leaveArenaToLobby}>
+            Leave
+          </button>
+        )}
+        {phase === 'arena' && terrifyingToweringActive && (
+          <button type="button" className="leave-toggle" onClick={leaveTowerToMenu}>
             Leave
           </button>
         )}
@@ -3772,14 +4604,20 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
         </div>
       )}
 
-      {phase === 'arena' && !terrifyingToweringActive && serverAnnouncement && (
-        <div className="server-announcement" role="status" aria-live="polite">
-          <span>Arena Event</span>
-          <p>{serverAnnouncement}</p>
+      {towerWinMessage && (
+        <div className="death-announcement tower-win-announcement" role="status" aria-live="assertive">
+          {towerWinMessage}
         </div>
       )}
 
-      {phase === 'arena' && isPaused && (
+      {phase === 'arena' && displayedServerAnnouncement && (
+        <div className="server-announcement" role="status" aria-live="polite">
+          <span>{terrifyingToweringActive ? 'Tower Event' : 'Arena Event'}</span>
+          <p>{displayedServerAnnouncement}</p>
+        </div>
+      )}
+
+      {phase === 'arena' && !terrifyingToweringActive && isPaused && (
         <div className="pause-announcement" role="status" aria-live="polite">
           Paused
         </div>
@@ -3788,14 +4626,24 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
       {phase === 'arena' && hasInventoryItems && (
         <div className="player-inventory" aria-label="Player inventory">
           <span>Inventory</span>
-          {hasSword && (
+          {(terrifyingToweringActive ? towerItems.hasSword : hasSword) && (
             <button type="button" className={equippedItem === 'sword' ? 'active' : ''} onClick={() => setEquippedItem('sword')}>
               Sword
             </button>
           )}
-          {isZombieKingAlive(zombieKing) && (
+          {!terrifyingToweringActive && isZombieKingAlive(zombieKing) && (
             <button type="button" className={equippedItem === 'gun' ? 'active' : ''} onClick={() => setEquippedItem('gun')}>
               Gun
+            </button>
+          )}
+          {terrifyingToweringActive && towerItems.hasPizza && (
+            <button type="button" className={equippedItem === 'pizza' ? 'active' : ''} onClick={() => setEquippedItem('pizza')}>
+              Pizza
+            </button>
+          )}
+          {terrifyingToweringActive && towerItems.hasWarp && (
+            <button type="button" className={equippedItem === 'warp' ? 'active' : ''} onClick={() => setEquippedItem('warp')}>
+              Warp
             </button>
           )}
         </div>
@@ -3808,19 +4656,26 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
         onPointerMove={(event) => {
           if (phase !== 'arena' || equippedItem !== 'gun') return;
           const rect = event.currentTarget.getBoundingClientRect();
-          updateGunTarget({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+          updateGunTarget(screenToWorld({ x: event.clientX - rect.left, y: event.clientY - rect.top }));
         }}
         onPointerLeave={() => setTargetedZombieId(null)}
         onPointerDown={(event) => {
           if (phase !== 'arena' || (arenaMode !== 'main' && !playerInActiveDuel)) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          const worldPoint = screenToWorld({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+          if (terrifyingToweringActive && equippedItem === 'warp') {
+            const target = getTowerPlayerAtWorld(worldPoint);
+            if (target) towerSocketRef.current?.emit('tower:warp', { targetClientId: target.clientId });
+            return;
+          }
           if (equippedItem === 'gun') {
-            const rect = event.currentTarget.getBoundingClientRect();
-            shootGunAt({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+            shootGunAt(worldPoint);
           } else {
             swingSword();
           }
         }}
       >
+        <div className="game-world" style={gameWorldStyle}>
         {phase === 'lobby' ? (
           <>
             <div className="spawn-pad">
@@ -3876,7 +4731,71 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
             </div>
           </>
         ) : terrifyingToweringActive ? (
-          <div className="terrifying-platform" aria-hidden="true" />
+          <>
+            {terrifyingTowerPlacements.map((placement, index) => (
+              <div
+                key={`platform-${placement}`}
+                className={`terrifying-green-platform terrifying-green-platform-${placement} ${loweredTowerSlots.has(index) ? 'lowered' : ''} ${
+                  hiddenTowerSlots.has(index) ? 'hidden' : ''
+                }`}
+                aria-hidden="true"
+              />
+            ))}
+            {terrifyingTowerPlacements.map((placement, index) => (
+              <div
+                key={`tower-${placement}`}
+                className={`terrifying-tower terrifying-tower-${placement} ${loweredTowerSlots.has(index) ? 'lowered' : ''} ${
+                  hiddenTowerSlots.has(index) ? 'hidden' : ''
+                }`}
+                style={getTowerDecorationStyleForSlot(index)}
+                aria-hidden="true"
+              >
+                <div className="tower-preview-roof" />
+                <div className="tower-preview-body">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="tower-preview-base" />
+              </div>
+            ))}
+            {towerEffects.doomsdayStrikes.map((strike) => {
+              const center = getTowerSlotCenter(strike.slot);
+              const hasHit = clockNow >= strike.hitAt;
+              const visible = clockNow >= strike.warningAt;
+              if (!visible) return null;
+
+              return (
+                <div
+                  key={strike.id}
+                  className={`tower-doomsday-strike ${hasHit ? 'hit' : ''}`}
+                  style={{ left: `${center.x}px`, top: `${center.y}px` }}
+                  aria-hidden="true"
+                />
+              );
+            })}
+            {towerEffects.bombs.map((bomb) => (
+              <div key={bomb.id} className="tower-bomb" style={{ left: `${bomb.x}px`, top: `${bomb.y}px` }} aria-hidden="true">
+                <span />
+              </div>
+            ))}
+            {towerEffects.explosions.map((explosion) => (
+              <div key={explosion.id} className="tower-explosion" style={{ left: `${explosion.x}px`, top: `${explosion.y}px` }} aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+            ))}
+            {towerEffects.missiles.map((missile) => {
+              const target = getTowerMissileTarget(missile);
+              if (!target) return null;
+
+              const progress = clamp((clockNow - missile.launchedAt) / Math.max(1, missile.hitAt - missile.launchedAt), 0, 1);
+              const y = target.y - 260 + 230 * progress;
+
+              return <div key={missile.id} className="tower-missile" style={{ left: `${target.x}px`, top: `${y}px` }} aria-hidden="true" />;
+            })}
+          </>
         ) : arenaMode === 'main' ? (
           <>
             <div className="arena-center">
@@ -3994,9 +4913,30 @@ export function Lobby({ nickname, userId, onMenuOpenChange, onSignOut }: LobbyPr
             .filter((bot) => arenaMode === 'main' || duelState?.fighters.includes(bot.clientId))
             .map((bot) => <PlayerAvatar key={bot.clientId} player={bot} position={worldToScreen(bot.position)} />)}
 
+        {phase === 'arena' &&
+          terrifyingToweringActive &&
+          towerRemotePlayerSnapshots.map((remotePlayer) => (
+            <PlayerAvatar
+              key={remotePlayer.clientId}
+              player={remotePlayer}
+              position={terrifyingToweringActive ? getTowerPlayerDisplayPosition(remotePlayer.position) : worldToScreen(remotePlayer.position)}
+              equippedItem={remotePlayer.hasWarp ? 'warp' : remotePlayer.hasPizza ? 'pizza' : 'sword'}
+              className={remotePlayer.isFat ? 'tower-fat-player' : ''}
+            />
+          ))}
+
         {(phase === 'lobby' || arenaMode === 'main' || playerInActiveDuel) && (
-          <PlayerAvatar player={playerSnapshot} position={worldToScreen(playerSnapshot.position)} isLocal equippedItem={equippedItem} />
+          <PlayerAvatar
+            player={localPlayerSnapshot}
+            position={localPlayerDisplayPosition}
+            isLocal
+            equippedItem={equippedItem}
+            className={`${towerJumpFalling ? 'tower-jump-falling' : ''} ${towerVoidFalling ? 'tower-void-falling' : ''} ${
+              terrifyingToweringActive && towerItems.isFat ? 'tower-fat-player' : ''
+            }`}
+          />
         )}
+        </div>
       </div>
 
       {shopOpen && (
