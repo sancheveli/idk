@@ -85,10 +85,21 @@ type ClientToServerEvents = {
 
 export type TowerSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
-export function createTerrifyingToweringSocket() {
+function getTerrifyingToweringSocketUrl() {
   const configuredUrl = String(import.meta.env.VITE_SOCKET_URL || '').trim();
   const useRemoteSocketInDev = String(import.meta.env.VITE_USE_REMOTE_SOCKET || '').trim() === 'true';
-  const url = import.meta.env.DEV && !useRemoteSocketInDev ? 'http://localhost:3001' : configuredUrl || window.location.origin;
+
+  if (import.meta.env.DEV && !useRemoteSocketInDev) return 'http://localhost:3001';
+
+  if (!configuredUrl) {
+    throw new Error('Terrifying Towering multiplayer needs VITE_SOCKET_URL in production.');
+  }
+
+  return configuredUrl;
+}
+
+export function createTerrifyingToweringSocket() {
+  const url = getTerrifyingToweringSocketUrl();
 
   return io(url, {
     autoConnect: false,

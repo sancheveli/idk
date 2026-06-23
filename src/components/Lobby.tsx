@@ -1548,6 +1548,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   const [towerDecorations, setTowerDecorations] = useState<TowerDecorationState>(() => readSavedTowerDecorations(clientId));
   const [towerServerEvent, setTowerServerEvent] = useState<TowerServerEvent | null>(null);
   const [towerConnected, setTowerConnected] = useState(false);
+  const [towerConnectionError, setTowerConnectionError] = useState('');
   const [towerRoomId, setTowerRoomId] = useState('');
   const [towerMaxPlayers, setTowerMaxPlayers] = useState(5);
   const [towerAssignedNickname, setTowerAssignedNickname] = useState('');
@@ -1639,6 +1640,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   const towerPauseDisabled = phase === 'arena' && terrifyingToweringActive;
   const gameStopped = menuOpen || (isPaused && !towerPauseDisabled);
   const towerFrozen = terrifyingToweringActive && towerItems.frozenUntil > towerServerNow;
+  const towerAwaitingConnection = terrifyingToweringActive && !menuOpen && (!towerConnected || !towerRoomId || Boolean(towerConnectionError));
   const [towerSeated, setTowerSeated] = useState(false);
   const canMove = !gameStopped && !isDead && !isFrozen && !towerFrozen && !towerVoidFalling && !towerSeated && (phase === 'lobby' || arenaMode === 'main' || playerInActiveDuel);
 
@@ -1700,6 +1702,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     setTowerRoomId(snapshot.roomId);
     setTowerMaxPlayers(snapshot.maxPlayers);
     setTowerRemotePlayers(snapshot.players);
+    setTowerConnectionError('');
     setTowerServerEvent(snapshot.currentEvent);
     setTowerEffects(snapshot.effects);
     towerServerClockOffsetRef.current = snapshot.serverTime - Date.now();
@@ -1759,6 +1762,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     if (!isAuthenticated || !userId || !terrifyingToweringActive || menuOpen) {
       towerSocketRef.current?.disconnect();
       setTowerConnected(false);
+      setTowerConnectionError('');
       setTowerRemotePlayers([]);
       setTowerRoomId('');
       setTowerAssignedNickname('');
@@ -1772,7 +1776,20 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     }
 
     const joinedUserId = userId;
-    const socket = towerSocketRef.current ?? createTerrifyingToweringSocket();
+    setPhase('lobby');
+    setTimeLeft(0);
+    setRoundEndsAt(Date.now());
+    setServerAnnouncement('');
+
+    let socket: TowerSocket;
+    try {
+      socket = towerSocketRef.current ?? createTerrifyingToweringSocket();
+    } catch (error) {
+      setTowerConnected(false);
+      setTowerRoomId('');
+      setTowerConnectionError(error instanceof Error ? error.message : 'Terrifying Towering multiplayer is not configured.');
+      return;
+    }
     towerSocketRef.current = socket;
 
     function joinTowerRoom() {
@@ -1792,10 +1809,15 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
 
     socket.on('connect', () => {
       setTowerConnected(true);
+      setTowerConnectionError('');
       joinTowerRoom();
     });
     socket.on('disconnect', () => {
       setTowerConnected(false);
+    });
+    socket.on('connect_error', (error) => {
+      setTowerConnected(false);
+      setTowerConnectionError(error.message || 'Could not connect to the Terrifying Towering server.');
     });
     socket.on('tower:joined', ({ snapshot }) => applyTowerSnapshot(snapshot));
     socket.on('tower:snapshot', applyTowerSnapshot);
@@ -1819,6 +1841,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     return () => {
       socket.off('connect');
       socket.off('disconnect');
+      socket.off('connect_error');
       socket.off('tower:joined');
       socket.off('tower:snapshot');
       socket.off('tower:event');
@@ -5265,16 +5288,16 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
               Coins: <strong>{coins}</strong>
             </p>
           )}
-          {phase === 'arena' && terrifyingToweringActive && (
+          {terrifyingToweringActive && !menuOpen && (
             <p className="tower-network-status">
-              {towerConnected ? 'Socket online' : 'Reconnecting'} | {towerRemotePlayers.filter((player) => player.connected).length} online
+              {towerConnectionError || (towerConnected ? 'Socket online' : 'Reconnecting')} | {towerRemotePlayers.filter((player) => player.connected).length} online
               {towerRoomId ? ` | ${towerRoomId}` : ''} | max {towerMaxPlayers}
               {towerWaitingForRound ? ' | waiting for next round' : ''}
               {towerServerEvent ? ` | ${towerServerEvent.message}` : ''}
             </p>
           )}
         </div>
-        {!(phase === 'lobby' && afkModeActive) && !towerWaitingForRound && (
+        {!(phase === 'lobby' && afkModeActive) && !towerWaitingForRound && !towerAwaitingConnection && (
           <div className="round-info">
             <p className="round-label">{terrifyingToweringActive ? (phase === 'arena' ? 'Next event' : 'Next round') : phase === 'lobby' ? 'Teleporting in' : 'Arena time'}</p>
             <p className="round-timer">{formatTime(displayedTimeLeft)}</p>
@@ -5326,6 +5349,13 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
         <div className="server-announcement" role="status" aria-live="polite">
           <span>{terrifyingToweringActive ? 'Tower Event' : 'Arena Event'}</span>
           <p>{displayedServerAnnouncement}</p>
+        </div>
+      )}
+
+      {towerAwaitingConnection && (
+        <div className="server-announcement" role="status" aria-live="polite">
+          <span>Tower Network</span>
+          <p>{towerConnectionError || 'Reconnecting to Terrifying Towering...'}</p>
         </div>
       )}
 

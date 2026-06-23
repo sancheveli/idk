@@ -135,7 +135,20 @@ function sanitizeDecorations(value, fallback) {
   };
 }
 
-const httpServer = createServer();
+const httpServer = createServer((request, response) => {
+  const path = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`).pathname;
+
+  if (path === '/health') {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ ok: true, service: 'terrifying-towering-socket' }));
+    return;
+  }
+
+  if (path.startsWith('/socket.io/')) return;
+
+  response.writeHead(404, { 'content-type': 'text/plain' });
+  response.end('Not found');
+});
 const io = new Server(httpServer, {
   cors: {
     origin: clientOrigin,
