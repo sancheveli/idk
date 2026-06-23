@@ -99,6 +99,7 @@ export function Auth({ onAuthenticated }: AuthProps) {
           email: cleanEmail,
           password,
           options: {
+            emailRedirectTo: getAuthRedirectUrl(),
             data: {
               full_name: name.trim(),
             },

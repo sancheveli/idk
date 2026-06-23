@@ -4,6 +4,7 @@ export type TowerDecorationState = {
   roofColor: string;
   bodyColor: string;
   windowColor: string;
+  chairEnabled: boolean;
   updatedBy: string;
   updatedAt: number;
 };
@@ -26,6 +27,9 @@ export type TowerRemotePlayer = {
   hasSword: boolean;
   hasPizza: boolean;
   hasWarp: boolean;
+  equippedItem: 'sword' | 'pizza' | 'warp';
+  airborne: boolean;
+  falling: boolean;
   frozenUntil: number;
   isFat: boolean;
 };
@@ -68,10 +72,12 @@ type ServerToClientEvents = {
 };
 
 type ClientToServerEvents = {
-  'tower:join': (payload: { clientId: string; userId: string; nickname: string; decorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor'> }) => void;
-  'tower:input': (input: { left: boolean; right: boolean; airborne: boolean }) => void;
-  'tower:decoration': (decorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor'>) => void;
+  'tower:join': (payload: { clientId: string; userId: string; nickname: string; decorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor' | 'chairEnabled'> }) => void;
+  'tower:input': (input: { left: boolean; right: boolean; airborne: boolean; equippedItem?: 'sword' | 'pizza' | 'warp' }) => void;
+  'tower:land': (payload: { position: { x: number; y: number } }) => void;
+  'tower:decoration': (decorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor' | 'chairEnabled'>) => void;
   'tower:leave': (ack?: () => void) => void;
+  'tower:falling': () => void;
   'tower:die': () => void;
   'tower:warp': (payload: { targetClientId: string }) => void;
   'tower:sword': () => void;
@@ -80,7 +86,9 @@ type ClientToServerEvents = {
 export type TowerSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 export function createTerrifyingToweringSocket() {
-  const url = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
+  const configuredUrl = String(import.meta.env.VITE_SOCKET_URL || '').trim();
+  const useRemoteSocketInDev = String(import.meta.env.VITE_USE_REMOTE_SOCKET || '').trim() === 'true';
+  const url = import.meta.env.DEV && !useRemoteSocketInDev ? 'http://localhost:3001' : configuredUrl || window.location.origin;
 
   return io(url, {
     autoConnect: false,

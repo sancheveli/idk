@@ -7,9 +7,11 @@ const maxPlayersPerRoom = 5;
 const movementTickMs = 80;
 const eventIntervalMs = 7000;
 const loweredTowerDurationMs = 30000;
+const hiddenTowerUntilRoundEnd = Number.MAX_SAFE_INTEGER;
 const lobbyDurationMs = 10000;
 const reconnectGraceMs = 30000;
 const freezeDurationMs = 7000;
+const voidFallGraceMs = 1000;
 const swordDamage = 5;
 const swordCooldownMs = 2000;
 const swordRange = 86;
@@ -19,6 +21,7 @@ const towerAirStep = 32;
 const towerLandingY = 291.5;
 const loweredTowerOffset = 74;
 const towerEdgeInset = 10;
+const towerFootSupportMargin = 18;
 const towerPlatforms = [
   { left: 52.5, right: 202.5 },
   { left: 277.5, right: 427.5 },
@@ -44,6 +47,7 @@ const defaultDecorations = {
   roofColor: '#facc15',
   bodyColor: '#ef4444',
   windowColor: '#bae6fd',
+  chairEnabled: false,
   updatedBy: 'server',
   updatedAt: Date.now(),
 };
@@ -125,6 +129,7 @@ function sanitizeDecorations(value, fallback) {
     roofColor: String(value?.roofColor || fallback.roofColor).slice(0, 24),
     bodyColor: String(value?.bodyColor || fallback.bodyColor).slice(0, 24),
     windowColor: String(value?.windowColor || fallback.windowColor).slice(0, 24),
+    chairEnabled: Boolean(value?.chairEnabled),
     updatedBy: fallback.updatedBy || 'server',
     updatedAt: Date.now(),
   };
@@ -180,16 +185,24 @@ function createRoom() {
   return room;
 }
 
-function getActivePlayers(room) {
+function getConnectedPlayers(room) {
   return Array.from(room.players.values()).filter((player) => player.connected);
+}
+
+function getActivePlayers(room) {
+  return getConnectedPlayers(room);
 }
 
 function getRoomSocketCount(room) {
   return io.sockets.adapter.rooms.get(room.id)?.size ?? 0;
 }
 
+function getActualConnectedPlayerCount(room) {
+  return getRoomSocketCount(room);
+}
+
 function roomHasSockets(room) {
-  return getRoomSocketCount(room) > 0;
+  return getActualConnectedPlayerCount(room) > 0;
 }
 
 function pauseEmptyRoom(room, now = Date.now()) {
@@ -225,16 +238,57 @@ function getReservablePlayers(room) {
   return Array.from(room.players.values()).filter((player) => player.connected || now - player.disconnectedAt < reconnectGraceMs);
 }
 
+function getReportedPlayerCount(room) {
+  return getReservablePlayers(room).length;
+}
+
+function clearDisconnectedRoom(room, now = Date.now()) {
+  for (const clientId of room.players.keys()) {
+    if (clientRooms.get(clientId) === room.id) clientRooms.delete(clientId);
+  }
+  room.players.clear();
+  pauseEmptyRoom(room, now);
+}
+
+function logMatchmakingDecision(room, decision, clientId) {
+  console.log('[tower:matchmaking]', {
+    roomId: room.id,
+    serverId: room.id,
+    reportedPlayerCount: getReportedPlayerCount(room),
+    actualConnectedPlayerCount: getActualConnectedPlayerCount(room),
+    clientId,
+    decision,
+  });
+}
+
 function getRoomForClient(clientId) {
   const existingRoomId = clientRooms.get(clientId);
   const existingRoom = existingRoomId ? rooms.get(existingRoomId) : null;
-  if (existingRoom?.players.has(clientId)) return existingRoom;
-
-  for (const room of rooms.values()) {
-    if (getReservablePlayers(room).length < maxPlayersPerRoom) return room;
+  if (existingRoom?.players.has(clientId)) {
+    if (roomHasSockets(existingRoom)) {
+      logMatchmakingDecision(existingRoom, 'reused existing client room', clientId);
+      return existingRoom;
+    }
+    clearDisconnectedRoom(existingRoom);
+    logMatchmakingDecision(existingRoom, 'cleared empty existing client room', clientId);
   }
 
-  return createRoom();
+  for (const room of rooms.values()) {
+    if (!roomHasSockets(room)) {
+      clearDisconnectedRoom(room);
+    }
+  }
+
+  for (const room of rooms.values()) {
+    if (getActualConnectedPlayerCount(room) < maxPlayersPerRoom) {
+      logMatchmakingDecision(room, roomHasSockets(room) ? 'selected existing room' : 'reused empty room', clientId);
+      return room;
+    }
+  }
+
+  const room = createRoom();
+  logMatchmakingDecision(room, 'created new room', clientId);
+  return room;
 }
 
 function getSpawnPosition(slot = 0) {
@@ -248,7 +302,7 @@ function getSpawnPosition(slot = 0) {
 function getNextOpenSlot(room, clientId) {
   const usedSlots = new Set(
     Array.from(room.players.values())
-      .filter((player) => player.clientId !== clientId)
+      .filter((player) => player.connected && player.clientId !== clientId)
       .map((player) => player.slot),
   );
 
@@ -280,12 +334,19 @@ function getPlatformLandingY(room, slot) {
 }
 
 function getLandingAt(room, position) {
-  const activePlatform = getActivePlatformSlots(room).find(({ platform }) => position.x >= platform.left + towerEdgeInset && position.x <= platform.right - towerEdgeInset);
+  const matchingPlatforms = getActivePlatformSlots(room)
+    .filter(({ platform }) => position.x >= platform.left + towerEdgeInset - towerFootSupportMargin && position.x <= platform.right - towerEdgeInset + towerFootSupportMargin)
+    .map((activePlatform) => ({
+      ...activePlatform,
+      landingY: getPlatformLandingY(room, activePlatform.slot),
+    }))
+    .sort((first, second) => Math.abs(position.y - first.landingY) - Math.abs(position.y - second.landingY));
+  const activePlatform = matchingPlatforms[0];
   if (!activePlatform) return null;
 
   return {
     x: clamp(position.x, activePlatform.platform.left + towerEdgeInset, activePlatform.platform.right - towerEdgeInset),
-    y: getPlatformLandingY(room, activePlatform.slot),
+    y: activePlatform.landingY,
     slot: activePlatform.slot,
   };
 }
@@ -311,6 +372,9 @@ function serializePlayer(player) {
     hasSword: player.hasSword,
     hasPizza: player.hasPizza,
     hasWarp: player.hasWarp,
+    equippedItem: player.equippedItem || 'sword',
+    airborne: Boolean(player.input?.airborne),
+    falling: Boolean(player.fallingUntil && Date.now() < player.fallingUntil),
     frozenUntil: player.frozenUntil,
     isFat: player.isFat,
   };
@@ -322,7 +386,7 @@ function snapshot(room) {
   return {
     roomId: room.id,
     phase: room.phase,
-    players: getReservablePlayers(room).map(serializePlayer),
+    players: getConnectedPlayers(room).map(serializePlayer),
     decorations: room.decorations,
     currentEvent: room.currentEvent,
     roundStartedAt: room.roundStartedAt,
@@ -338,7 +402,7 @@ function snapshot(room) {
       doomsdayStrikes: room.doomsdayStrikes,
       missiles: room.missiles,
     },
-    activePlayerCount: getRoomSocketCount(room),
+    activePlayerCount: getActualConnectedPlayerCount(room),
     maxPlayers: maxPlayersPerRoom,
     serverTime: now,
   };
@@ -409,7 +473,10 @@ function applyTowerEvent(room, message, now = Date.now()) {
   }
 
   if (message === 'Someones tower will disappear') {
-    room.hiddenTowers = getRandomItems([0, 1, 2, 3, 4], 1, now).map((slot) => ({ slot, until: now + eventIntervalMs }));
+    const hiddenSlots = new Set(room.hiddenTowers.map((effect) => effect.slot));
+    const availableSlots = [0, 1, 2, 3, 4].filter((slot) => !hiddenSlots.has(slot));
+    const nextSlot = getRandomItems(availableSlots.length > 0 ? availableSlots : [0, 1, 2, 3, 4], 1, now)[0];
+    room.hiddenTowers = [...room.hiddenTowers.filter((effect) => effect.slot !== nextSlot), { slot: nextSlot, until: hiddenTowerUntilRoundEnd }];
     return;
   }
 
@@ -473,13 +540,13 @@ function applyTowerEvent(room, message, now = Date.now()) {
 }
 
 function startRound(room, now = Date.now()) {
-  const participatingPlayers = getReservablePlayers(room).filter((player) => player.connected || player.status === 'ready');
+  const participatingPlayers = getConnectedPlayers(room);
   if (participatingPlayers.length === 0) {
     pauseEmptyRoom(room, now);
     return;
   }
 
-  if (participatingPlayers.filter((player) => player.connected).length < 2) {
+  if (participatingPlayers.length < 2) {
     room.phase = 'lobby';
     room.lobbyEndsAt = now + lobbyDurationMs;
     room.nextEventAt = room.lobbyEndsAt;
@@ -494,6 +561,12 @@ function startRound(room, now = Date.now()) {
       player.input = { left: false, right: false, airborne: false };
       player.updatedAt = now;
     }
+    console.log('[tower:round-waiting]', {
+      roomId: room.id,
+      connectedPlayers: participatingPlayers.length,
+      socketCount: getRoomSocketCount(room),
+      nextLobbyEndsAt: room.lobbyEndsAt,
+    });
     broadcastSnapshot(room);
     return;
   }
@@ -518,16 +591,24 @@ function startRound(room, now = Date.now()) {
     selectedAt: now,
     slot: 0,
   };
+  console.log('[tower:round-start]', {
+    roomId: room.id,
+    connectedPlayers: participatingPlayers.length,
+    socketCount: getRoomSocketCount(room),
+    nextEventAt: room.nextEventAt,
+  });
 
   for (const player of room.players.values()) {
-    if (player.connected || player.status === 'ready') {
+    if (player.connected) {
       player.status = 'alive';
       player.hp = 100;
       player.hasSword = false;
       player.hasPizza = false;
       player.hasWarp = false;
+      player.equippedItem = 'sword';
       player.frozenUntil = 0;
       player.isFat = false;
+      player.fallingUntil = 0;
       player.position = getSpawnPosition(player.slot);
       player.direction = 'front';
       player.input = { left: false, right: false, airborne: false };
@@ -586,29 +667,60 @@ function applyMovement(room, player) {
     y: clamp(player.position.y, bounds.minY, bounds.maxY),
   };
 
-  if (!player.input.airborne && !isOnPlatform(room, nextPosition)) return;
+  if (!player.input.airborne) {
+    const landing = getLandingAt(room, nextPosition);
+    if (!landing || Math.abs(nextPosition.y - landing.y) > 1) return;
+    player.position = { x: landing.x, y: landing.y };
+    player.updatedAt = Date.now();
+    return;
+  }
 
   player.position = nextPosition;
   player.updatedAt = Date.now();
 }
 
 function reconcilePlayerPlatforms(room) {
+  let removedPlayer = false;
+  const now = Date.now();
+
   for (const player of getAlivePlayers(room)) {
     if (player.input.airborne) continue;
 
     const landing = getLandingAt(room, player.position);
-    if (!landing) continue;
+    if (!landing) {
+      if (!player.fallingUntil) {
+        player.input = { left: false, right: false, airborne: false };
+        player.fallingUntil = now + voidFallGraceMs;
+        player.updatedAt = now;
+        continue;
+      }
 
-    if (!player.input.airborne && Math.abs(player.position.y - landing.y) > 1) {
+      if (now < player.fallingUntil) continue;
+
+      player.status = 'waiting';
+      player.input = { left: false, right: false, airborne: false };
+      player.fallingUntil = 0;
+      player.updatedAt = now;
+      removedPlayer = true;
+      continue;
+    }
+
+    if (player.fallingUntil) {
+      player.fallingUntil = 0;
+      player.updatedAt = now;
+    }
+
+    if (!player.input.airborne && (Math.abs(player.position.x - landing.x) > 1 || Math.abs(player.position.y - landing.y) > 1)) {
       player.position = { x: landing.x, y: landing.y };
-      player.updatedAt = Date.now();
+      player.updatedAt = now;
     }
   }
+
+  return removedPlayer;
 }
 
 function updateTimedTowerEffects(room, now = Date.now()) {
   room.loweredTowers = room.loweredTowers.filter((effect) => now < effect.until);
-  room.hiddenTowers = room.hiddenTowers.filter((effect) => now < effect.until);
   room.explosions = room.explosions.filter((effect) => now < effect.endsAt);
   room.doomsdayStrikes = room.doomsdayStrikes.filter((effect) => now < effect.endsAt);
 
@@ -637,7 +749,7 @@ function updateTimedTowerEffects(room, now = Date.now()) {
     });
   });
 
-  reconcilePlayerPlatforms(room);
+  if (reconcilePlayerPlatforms(room)) checkRoundEnd(room);
 }
 
 function pruneRooms() {
@@ -677,7 +789,10 @@ io.on('connection', (socket) => {
     const clientId = String(payload.clientId || socket.id);
     const room = getRoomForClient(clientId);
     const existingPlayer = room.players.get(clientId);
-    const slot = existingPlayer?.slot ?? getNextOpenSlot(room, clientId);
+    const existingSlotIsOpen =
+      existingPlayer &&
+      !Array.from(room.players.values()).some((player) => player.connected && player.clientId !== clientId && player.slot === existingPlayer.slot);
+    const slot = existingSlotIsOpen ? existingPlayer.slot : getNextOpenSlot(room, clientId);
     const player =
       existingPlayer || {
         clientId,
@@ -697,8 +812,10 @@ io.on('connection', (socket) => {
         hasSword: false,
         hasPizza: false,
         hasWarp: false,
+        equippedItem: 'sword',
         frozenUntil: 0,
         isFat: false,
+        fallingUntil: 0,
         lastSwordAt: 0,
       };
 
@@ -714,6 +831,8 @@ io.on('connection', (socket) => {
     player.connected = true;
     player.disconnectedAt = 0;
     player.input = { left: false, right: false, airborne: false };
+    player.equippedItem = 'sword';
+    player.fallingUntil = 0;
     player.slot = slot;
     if (room.phase === 'lobby') {
       player.status = 'ready';
@@ -759,6 +878,32 @@ io.on('connection', (socket) => {
       right: Boolean(input.right),
       airborne: Boolean(input.airborne),
     };
+    if (['sword', 'pizza', 'warp'].includes(input.equippedItem)) {
+      player.equippedItem = input.equippedItem;
+    }
+  });
+
+  socket.on('tower:land', (payload = {}) => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+    if (!player || player.status !== 'alive') return;
+
+    const requestedPosition = {
+      x: Number(payload.position?.x),
+      y: Number(payload.position?.y),
+    };
+    if (!Number.isFinite(requestedPosition.x) || !Number.isFinite(requestedPosition.y)) return;
+
+    const landing = getLandingAt(room, requestedPosition);
+    if (!landing) return;
+
+    player.position = { x: landing.x, y: landing.y };
+    player.input = { left: false, right: false, airborne: false };
+    player.fallingUntil = 0;
+    player.updatedAt = Date.now();
+    broadcastSnapshot(room);
   });
 
   socket.on('tower:decoration', (nextDecorations = {}) => {
@@ -785,9 +930,22 @@ io.on('connection', (socket) => {
 
     player.status = 'waiting';
     player.input = { left: false, right: false, airborne: false };
+    player.fallingUntil = 0;
     player.updatedAt = Date.now();
     broadcastSnapshot(room);
     checkRoundEnd(room);
+  });
+
+  socket.on('tower:falling', () => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+    if (!player || player.status !== 'alive') return;
+
+    player.input = { left: false, right: false, airborne: false };
+    player.fallingUntil = Date.now() + voidFallGraceMs;
+    player.updatedAt = Date.now();
   });
 
   socket.on('tower:warp', (payload = {}) => {
@@ -799,7 +957,6 @@ io.on('connection', (socket) => {
     if (!player || !target || !player.hasWarp || player.status !== 'alive' || target.status !== 'alive') return;
 
     player.position = { ...target.position };
-    player.hasWarp = false;
     player.updatedAt = Date.now();
     broadcastSnapshot(room);
   });
