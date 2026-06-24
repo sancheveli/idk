@@ -5,6 +5,7 @@ export type TowerDecorationState = {
   bodyColor: string;
   windowColor: string;
   chairEnabled: boolean;
+  plantEnabled: boolean;
   updatedBy: string;
   updatedAt: number;
 };
@@ -72,10 +73,10 @@ type ServerToClientEvents = {
 };
 
 type ClientToServerEvents = {
-  'tower:join': (payload: { clientId: string; userId: string; nickname: string; decorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor' | 'chairEnabled'> }) => void;
+  'tower:join': (payload: { clientId: string; userId: string; nickname: string; decorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor' | 'chairEnabled' | 'plantEnabled'> }) => void;
   'tower:input': (input: { left: boolean; right: boolean; airborne: boolean; equippedItem?: 'sword' | 'pizza' | 'warp' }) => void;
   'tower:land': (payload: { position: { x: number; y: number } }) => void;
-  'tower:decoration': (decorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor' | 'chairEnabled'>) => void;
+  'tower:decoration': (decorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor' | 'chairEnabled' | 'plantEnabled'>) => void;
   'tower:leave': (ack?: () => void) => void;
   'tower:falling': () => void;
   'tower:die': () => void;

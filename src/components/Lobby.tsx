@@ -47,6 +47,7 @@ type PlayerShopAccount = {
   coins: number;
   owns_brown_chair: boolean;
   owns_purple_tower: boolean;
+  owns_pink_tower: boolean;
   tower_decorations?: TowerDecorationState | null;
   updated_at?: string;
 };
@@ -269,11 +270,15 @@ const duelSpawnSlots: [Position, Position] = [
   { x: 745, y: 360 },
 ];
 const postDuelPlayerSpawn: Position = { x: worldWidth / 2, y: worldHeight - 58 };
-const brownChairCost = 100;
-const purpleTowerCost = 20;
+const brownChairCost = 200;
+const purpleTowerCost = 70;
+const pinkTowerCost = 50;
+const towerWinCoinReward = 50;
 const botKillCoinReward = 10;
 const zombieKingKillCoinReward = 50;
 const purpleTowerColor = '#9333ea';
+const pinkTowerColor = '#ec4899';
+const maxTowerDecorations = 3;
 const serverAnnouncements: ServerEvent[] = [
   'Someone will get a sword',
   'Something will explode',
@@ -292,6 +297,7 @@ const defaultTowerDecorations: TowerDecorationState = {
   bodyColor: '#ef4444',
   windowColor: '#bae6fd',
   chairEnabled: false,
+  plantEnabled: false,
   updatedBy: 'server',
   updatedAt: 0,
 };
@@ -410,6 +416,7 @@ function sanitizeTowerDecorations(value: Partial<TowerDecorationState> | null | 
     bodyColor: String(value?.bodyColor || fallback.bodyColor).slice(0, 24),
     windowColor: String(value?.windowColor || fallback.windowColor).slice(0, 24),
     chairEnabled: Boolean(value?.chairEnabled ?? fallback.chairEnabled),
+    plantEnabled: Boolean(value?.plantEnabled ?? fallback.plantEnabled),
     updatedBy: String(value?.updatedBy || fallback.updatedBy || 'player').slice(0, 32),
     updatedAt: Number(value?.updatedAt || Date.now()),
   };
@@ -438,6 +445,7 @@ function sanitizePlayerShopAccount(value: Partial<PlayerShopAccount> | null | un
     coins: Math.max(0, Math.floor(Number(value?.coins) || 0)),
     owns_brown_chair: Boolean(value?.owns_brown_chair),
     owns_purple_tower: Boolean(value?.owns_purple_tower),
+    owns_pink_tower: Boolean(value?.owns_pink_tower),
     tower_decorations: value?.tower_decorations ? sanitizeTowerDecorations(value.tower_decorations) : null,
     updated_at: String(value?.updated_at || new Date(0).toISOString()),
   };
@@ -1533,6 +1541,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   const [coins, setCoins] = useState(0);
   const [ownsBrownChair, setOwnsBrownChair] = useState(false);
   const [ownsPurpleTower, setOwnsPurpleTower] = useState(false);
+  const [ownsPinkTower, setOwnsPinkTower] = useState(false);
   const [shopError, setShopError] = useState('');
   const [roomStartedAt, setRoomStartedAt] = useState(joinedAtRef.current);
   const [roundSeed, setRoundSeed] = useState(0);
@@ -1555,6 +1564,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   const [towerWinMessage, setTowerWinMessage] = useState('');
   const [towerColorPickerOpen, setTowerColorPickerOpen] = useState(false);
   const [towerAreaPickerOpen, setTowerAreaPickerOpen] = useState(false);
+  const [towerDecorationPickerOpen, setTowerDecorationPickerOpen] = useState(false);
   const [towerWaitingForRound, setTowerWaitingForRound] = useState(false);
   const [towerEffects, setTowerEffects] = useState<TowerSnapshot['effects']>({
     loweredTowers: [],
@@ -1591,8 +1601,9 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   const towerJumpStartYRef = useRef(0);
   const towerSeatedRef = useRef(false);
   const towerPendingLandingRef = useRef<{ position: Position; expiresAt: number } | null>(null);
-  const playerShopAccountRef = useRef<PlayerShopAccount>({ coins: 0, owns_brown_chair: false, owns_purple_tower: false });
+  const playerShopAccountRef = useRef<PlayerShopAccount>({ coins: 0, owns_brown_chair: false, owns_purple_tower: false, owns_pink_tower: false });
   const towerDecorationsRef = useRef(towerDecorations);
+  const awardedTowerWinIdsRef = useRef(new Set<string>());
   const towerServerClockOffsetRef = useRef(0);
   const towerServerNow = clockNow + towerServerClockOffsetRef.current;
   const towerVoidFallingRef = useRef(towerVoidFalling);
@@ -1649,8 +1660,12 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     return getPlayerDisplayName(customNickname || nickname);
   }, [customNickname, nickname]);
   const unlockedTowerBodyColors = useMemo(() => {
-    return ownsPurpleTower ? [...towerDecorationPalettes.bodyColor, purpleTowerColor] : towerDecorationPalettes.bodyColor;
-  }, [ownsPurpleTower]);
+    return [
+      ...towerDecorationPalettes.bodyColor,
+      ...(ownsPurpleTower ? [purpleTowerColor] : []),
+      ...(ownsPinkTower ? [pinkTowerColor] : []),
+    ];
+  }, [ownsPinkTower, ownsPurpleTower]);
   const formatFeedbackTime = (createdAt: string) =>
     new Intl.DateTimeFormat(undefined, {
       month: 'short',
@@ -1736,7 +1751,12 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     setTimeLeft(waitingForActiveRound ? 0 : Math.max(0, Math.ceil((snapshot.nextEventAt - snapshot.serverTime) / 1000)));
     setRoundEndsAt(waitingForActiveRound ? Date.now() : snapshot.nextEventAt);
     setPhase(nextTowerPhase);
-    setTowerWinMessage(snapshot.phase === 'lobby' && snapshot.winnerId === clientId ? 'YOU WIN' : '');
+    const wonTowerRound = snapshot.phase === 'lobby' && snapshot.winnerId === clientId;
+    setTowerWinMessage(wonTowerRound ? 'YOU WIN' : '');
+    if (wonTowerRound && snapshot.currentEvent?.id && !awardedTowerWinIdsRef.current.has(snapshot.currentEvent.id)) {
+      awardedTowerWinIdsRef.current.add(snapshot.currentEvent.id);
+      awardCoins(towerWinCoinReward);
+    }
     if (nextTowerPhase === 'lobby') {
       const roomClientIds = snapshot.players.map((player) => player.clientId);
       setPosition(getSpawnPosition('lobby', clientId, roomClientIds));
@@ -1826,6 +1846,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
           bodyColor: currentDecorations.bodyColor,
           windowColor: currentDecorations.windowColor,
           chairEnabled: currentDecorations.chairEnabled,
+          plantEnabled: currentDecorations.plantEnabled,
         },
       });
     }
@@ -2045,6 +2066,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       setCoins(0);
       setOwnsBrownChair(false);
       setOwnsPurpleTower(false);
+      setOwnsPinkTower(false);
       return;
     }
 
@@ -2554,6 +2576,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     setCoins(safeAccount.coins);
     setOwnsBrownChair(safeAccount.owns_brown_chair);
     setOwnsPurpleTower(safeAccount.owns_purple_tower);
+    setOwnsPinkTower(safeAccount.owns_pink_tower);
     if (safeAccount.tower_decorations) {
       const nextDecorations = sanitizeTowerDecorations(safeAccount.tower_decorations, towerDecorationsRef.current);
       setTowerDecorations(nextDecorations);
@@ -2571,6 +2594,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       coins: account.coins,
       owns_brown_chair: account.owns_brown_chair,
       owns_purple_tower: account.owns_purple_tower,
+      owns_pink_tower: account.owns_pink_tower,
       tower_decorations: account.tower_decorations ?? towerDecorationsRef.current,
       updated_at: account.updated_at || new Date().toISOString(),
     });
@@ -2589,7 +2613,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
 
     const { data, error } = await supabase
       .from('player_shop_accounts')
-      .select('coins,owns_brown_chair,owns_purple_tower,tower_decorations,updated_at')
+      .select('coins,owns_brown_chair,owns_purple_tower,owns_pink_tower,tower_decorations,updated_at')
       .eq('user_id', userId)
       .maybeSingle();
 
@@ -2647,10 +2671,18 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     }
 
     setShopError('');
+    updateTowerDecorations({
+      roofColor: towerDecorations.roofColor,
+      bodyColor: towerDecorations.bodyColor,
+      windowColor: towerDecorations.windowColor,
+      chairEnabled: true,
+      plantEnabled: towerDecorations.plantEnabled,
+    });
     void updatePlayerShopAccount((account) => ({
       ...account,
       coins: account.coins - brownChairCost,
       owns_brown_chair: true,
+      tower_decorations: towerDecorationsRef.current,
     }));
   }
 
@@ -2670,6 +2702,25 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       ...account,
       coins: account.coins - purpleTowerCost,
       owns_purple_tower: true,
+    }));
+  }
+
+  function buyPinkTower() {
+    if (!isAuthenticated || !userId) {
+      onSignInRequest?.();
+      return;
+    }
+    if (ownsPinkTower) return;
+    if (coins < pinkTowerCost) {
+      setShopError('Not enough coins for pink tower color.');
+      return;
+    }
+
+    setShopError('');
+    void updatePlayerShopAccount((account) => ({
+      ...account,
+      coins: account.coins - pinkTowerCost,
+      owns_pink_tower: true,
     }));
   }
 
@@ -3893,7 +3944,8 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
             setPosition(landing);
           }
         } else if (towerJumpFalling) {
-          const landing = getTerrifyingToweringLandingForJump(next, latestTowerEffects);
+          const chairLanding = getTerrifyingToweringChairLandingForJump(next, latestTowerEffects);
+          const landing = chairLanding ?? getTerrifyingToweringLandingForJump(next, latestTowerEffects);
           if (landing && canCompleteTowerJumpLanding(landing)) {
             midairLanding = landing;
             positionRef.current = landing;
@@ -3907,7 +3959,11 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
           setPosition(next);
         }
         if (midairLanding) {
-          completeTowerLanding(midairLanding);
+          if (getTerrifyingToweringChairLandingForJump(midairLanding, latestTowerEffects)) {
+            completeTowerChairLanding(midairLanding);
+          } else {
+            completeTowerLanding(midairLanding);
+          }
           return;
         }
         updateTowerInput({
@@ -3982,7 +4038,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     return () => {
       window.removeEventListener('keydown', preventTowerSpaceScroll, { capture: true });
     };
-  }, [phase, terrifyingToweringActive]);
+  }, [canMove, phase, terrifyingToweringActive, towerJumpFalling, towerJumpOffset, towerVoidFalling]);
 
   useEffect(() => {
     if (!isFrozen && !gameStopped) return;
@@ -4033,6 +4089,12 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     if (phase !== 'arena' || !terrifyingToweringActive || !towerJumpFalling || towerVoidFalling) return;
 
     const timer = window.setInterval(() => {
+      const chairLanding = getTerrifyingToweringChairLandingForJump(positionRef.current, towerEffectsRef.current);
+      if (chairLanding && canCompleteTowerJumpLanding(chairLanding)) {
+        completeTowerChairLanding(chairLanding);
+        return;
+      }
+
       const landing = getTerrifyingToweringLandingForJump(positionRef.current, towerEffectsRef.current);
       if (landing && canCompleteTowerJumpLanding(landing)) completeTowerLanding(landing);
     }, 16);
@@ -4201,6 +4263,33 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     };
   }
 
+  function getTerrifyingToweringChairLandingForJump(positionToLand: Position, effects = towerEffects) {
+    const jumpApexY = (towerJumpStartYRef.current || positionToLand.y) - terrifyingToweringJumpDistance;
+    const chairPlatform = getTerrifyingToweringPlatformWorldBoundsList(effects)
+      .map((platform) => {
+        const chair = getTowerChairPosition(platform.slot, effects);
+        return {
+          ...platform,
+          chairX: chair.x,
+          chairY: chair.y,
+          seatY: chair.y + 46,
+        };
+      })
+      .filter((platform) => {
+        if (platform.hidden || !getTowerDecorationsForSlot(platform.slot).chairEnabled) return false;
+        return platform.seatY >= jumpApexY - 2 && positionToLand.x >= platform.chairX - 34 && positionToLand.x <= platform.chairX + 34;
+      })
+      .sort((first, second) => first.seatY - second.seatY)[0];
+
+    if (!chairPlatform) return null;
+
+    return {
+      x: chairPlatform.chairX,
+      y: chairPlatform.seatY,
+      slot: chairPlatform.slot,
+    };
+  }
+
   function isOnTerrifyingToweringPlatform(nextPosition: Position, effects = towerEffects) {
     const landing = getTerrifyingToweringLandingAt(nextPosition, effects);
 
@@ -4208,6 +4297,8 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   }
 
   function completeTowerLanding(landing: Position) {
+    if (towerVoidFallingRef.current) return;
+
     towerPendingLandingRef.current = { position: landing, expiresAt: Date.now() + 1800 };
     if (towerJumpTimerRef.current) {
       window.clearTimeout(towerJumpTimerRef.current);
@@ -4232,6 +4323,30 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       if (!towerPendingLandingRef.current) return;
       towerSocketRef.current?.emit('tower:land', { position: towerPendingLandingRef.current.position });
     }, 180);
+  }
+
+  function completeTowerChairLanding(landing: Position) {
+    if (towerVoidFallingRef.current) return;
+
+    if (towerJumpTimerRef.current) {
+      window.clearTimeout(towerJumpTimerRef.current);
+      towerJumpTimerRef.current = null;
+    }
+    if (towerFallTimerRef.current) {
+      window.clearTimeout(towerFallTimerRef.current);
+      towerFallTimerRef.current = null;
+    }
+    setPosition(landing);
+    positionRef.current = landing;
+    setTowerJumpOffset(0);
+    setTowerJumpFalling(false);
+    towerJumpLockedRef.current = false;
+    towerAirborneRef.current = false;
+    towerJumpStartSlotRef.current = null;
+    towerJumpStartedAtRef.current = 0;
+    towerJumpStartYRef.current = 0;
+    setTowerSeated(true);
+    stopTowerInput();
   }
 
   function canCompleteTowerJumpLanding(landing: Position & { slot?: number }) {
@@ -4501,11 +4616,13 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
 
   function setTowerBodyColor(bodyColor: string) {
     if (bodyColor === purpleTowerColor && !ownsPurpleTower) return;
+    if (bodyColor === pinkTowerColor && !ownsPinkTower) return;
     const nextDecorations = {
       roofColor: towerDecorations.roofColor,
       bodyColor,
       windowColor: towerDecorations.windowColor,
       chairEnabled: towerDecorations.chairEnabled,
+      plantEnabled: towerDecorations.plantEnabled,
     };
 
     updateTowerDecorations(nextDecorations);
@@ -4517,20 +4634,34 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       bodyColor: towerDecorations.bodyColor,
       windowColor: towerDecorations.windowColor,
       chairEnabled: towerDecorations.chairEnabled,
+      plantEnabled: towerDecorations.plantEnabled,
     });
   }
 
-  function toggleTowerChairDecoration() {
-    if (!ownsBrownChair) return;
+  function getSelectedTowerDecorationCount(nextDecorations = towerDecorations) {
+    return Number(nextDecorations.chairEnabled) + Number(nextDecorations.plantEnabled);
+  }
+
+  function canEnableTowerDecoration() {
+    return getSelectedTowerDecorationCount() < maxTowerDecorations;
+  }
+
+  function toggleTowerDecoration(decoration: 'chair' | 'plant') {
+    if (decoration === 'chair' && !ownsBrownChair) return;
+    const nextChairEnabled = decoration === 'chair' ? !towerDecorations.chairEnabled : towerDecorations.chairEnabled;
+    const nextPlantEnabled = decoration === 'plant' ? !towerDecorations.plantEnabled : towerDecorations.plantEnabled;
+    if (getSelectedTowerDecorationCount({ ...towerDecorations, chairEnabled: nextChairEnabled, plantEnabled: nextPlantEnabled }) > maxTowerDecorations) return;
+
     updateTowerDecorations({
       roofColor: towerDecorations.roofColor,
       bodyColor: towerDecorations.bodyColor,
       windowColor: towerDecorations.windowColor,
-      chairEnabled: !towerDecorations.chairEnabled,
+      chairEnabled: nextChairEnabled,
+      plantEnabled: nextPlantEnabled,
     });
   }
 
-  function updateTowerDecorations(nextDecorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor' | 'chairEnabled'>) {
+  function updateTowerDecorations(nextDecorations: Pick<TowerDecorationState, 'roofColor' | 'bodyColor' | 'windowColor' | 'chairEnabled' | 'plantEnabled'>) {
     const savedDecorations = sanitizeTowerDecorations({ ...towerDecorations, ...nextDecorations, updatedBy: displayName, updatedAt: Date.now() }, towerDecorations);
     setTowerDecorations(savedDecorations);
     towerDecorationsRef.current = savedDecorations;
@@ -4685,7 +4816,8 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
           setPosition(landing);
         }
       } else if (towerJumpFalling) {
-        const landing = getTerrifyingToweringLandingForJump(next, latestTowerEffects);
+        const chairLanding = getTerrifyingToweringChairLandingForJump(next, latestTowerEffects);
+        const landing = chairLanding ?? getTerrifyingToweringLandingForJump(next, latestTowerEffects);
         midairLanding = landing && canCompleteTowerJumpLanding(landing) ? landing : null;
         if (midairLanding) {
           positionRef.current = midairLanding;
@@ -4698,10 +4830,14 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
         positionRef.current = next;
         setPosition(next);
       }
-      if (midairLanding) {
+    if (midairLanding) {
+      if (getTerrifyingToweringChairLandingForJump(midairLanding, latestTowerEffects)) {
+        completeTowerChairLanding(midairLanding);
+      } else {
         completeTowerLanding(midairLanding);
-        return;
       }
+      return;
+    }
       updateTowerInput({ left: nextDx < 0, right: nextDx > 0, airborne: towerAirMovement });
       window.setTimeout(() => {
         updateTowerInput({ left: false, right: false, airborne: towerAirborneRef.current });
@@ -4736,10 +4872,13 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       return;
     }
     if (!canMove || phase !== 'arena' || !terrifyingToweringActive) return;
-    if (towerJumpLockedRef.current || towerAirborneRef.current || towerJumpOffset > 0 || towerJumpFalling || towerVoidFalling) return;
+    if (towerPendingLandingRef.current || towerVoidFallingRef.current || towerJumpLockedRef.current || towerAirborneRef.current || towerJumpOffset > 0 || towerJumpFalling || towerVoidFalling) return;
     const latestTowerEffects = towerEffectsRef.current;
     const startLanding = getTerrifyingToweringLandingAt(positionRef.current, latestTowerEffects);
-    if (!startLanding) return;
+    if (!startLanding || Math.abs(positionRef.current.y - startLanding.y) > 1) {
+      triggerTowerVoidFall();
+      return;
+    }
 
     towerJumpLockedRef.current = true;
     towerAirborneRef.current = true;
@@ -4759,6 +4898,12 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       setTowerJumpOffset(0);
       towerJumpTimerRef.current = null;
       towerFallTimerRef.current = window.setTimeout(() => {
+        const chairLanding = getTerrifyingToweringChairLandingForJump(positionRef.current, towerEffectsRef.current);
+        if (chairLanding) {
+          completeTowerChairLanding(chairLanding);
+          return;
+        }
+
         const landing = getTerrifyingToweringLandingForJump(positionRef.current, towerEffectsRef.current);
         if (landing) {
           completeTowerLanding(landing);
@@ -4771,6 +4916,9 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   }
 
   function triggerTowerVoidFall() {
+    if (towerVoidFallingRef.current) return;
+
+    towerVoidFallingRef.current = true;
     pressedKeys.current.clear();
     stopTowerInput();
     setTowerSeated(false);
@@ -4883,29 +5031,14 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     };
   }
 
-  function getTowerChairPosition(slot: number) {
+  function getTowerChairPosition(slot: number, effects = towerEffectsRef.current) {
     const center = getTowerSlotCenter(slot);
-    const platform = getTerrifyingToweringPlatformWorldBoundsList(towerEffectsRef.current)[slot];
+    const platform = getTerrifyingToweringPlatformWorldBoundsList(effects)[slot];
 
     return {
       x: center.x,
       y: (platform?.top ?? getTerrifyingToweringLandingY()) - 46,
     };
-  }
-
-  function sitOnTowerChair(slot: number) {
-    if (phase !== 'arena' || !terrifyingToweringActive || !towerDecorations.chairEnabled || !ownsBrownChair || towerVoidFalling) return;
-    const self = towerRemotePlayers.find((player) => player.clientId === clientId);
-    if (!self || self.slot !== slot || self.status !== 'alive') return;
-
-    const chair = getTowerChairPosition(slot);
-    setPosition({ x: chair.x, y: chair.y + 46 });
-    setTowerJumpOffset(0);
-    setTowerJumpFalling(false);
-    towerJumpLockedRef.current = false;
-    towerAirborneRef.current = false;
-    setTowerSeated(true);
-    stopTowerInput();
   }
 
   function getTowerPlayerAtWorld(worldPosition: Position) {
@@ -5031,9 +5164,6 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     const slotPlayer = towerRemotePlayers.find((player) => player.slot === slot);
 
     return sanitizeTowerDecorations(slotPlayer?.decorations, defaultTowerDecorations);
-  }
-  function localPlayerOwnsTowerSlot(slot: number) {
-    return towerRemotePlayers.some((player) => player.clientId === clientId && player.slot === slot && player.status === 'alive');
   }
   const gameWorldStyle = {
     width: `${worldWidth}px`,
@@ -5252,6 +5382,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
                   <div className="tower-editor-panel" aria-label="Tower editor">
                     <div className="tower-preview" style={towerDecorationStyle} aria-hidden="true">
                       {towerDecorations.chairEnabled && <span className="tower-chair tower-chair-preview" />}
+                      {towerDecorations.plantEnabled && <span className="tower-potted-plant tower-potted-plant-preview" />}
                       <div className="tower-preview-roof" />
                       <div className="tower-preview-body">
                         <span />
@@ -5266,6 +5397,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
                         onClick={() => {
                           setTowerColorPickerOpen((current) => !current);
                           setTowerAreaPickerOpen(false);
+                          setTowerDecorationPickerOpen(false);
                         }}
                       >
                         Color
@@ -5284,14 +5416,45 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
                           ))}
                         </div>
                       )}
-                      <button type="button" className={towerDecorations.chairEnabled ? 'active' : ''} onClick={toggleTowerChairDecoration} disabled={!ownsBrownChair}>
+                      <button
+                        type="button"
+                        className={towerDecorationPickerOpen ? 'active' : ''}
+                        onClick={() => {
+                          setTowerDecorationPickerOpen((current) => !current);
+                          setTowerColorPickerOpen(false);
+                          setTowerAreaPickerOpen(false);
+                        }}
+                      >
                         Decorations
                       </button>
+                      {towerDecorationPickerOpen && (
+                        <div className="tower-decoration-options" aria-label="Tower decorations">
+                          <button
+                            type="button"
+                            className={towerDecorations.chairEnabled ? 'active' : ''}
+                            onClick={() => toggleTowerDecoration('chair')}
+                            disabled={!ownsBrownChair || (!towerDecorations.chairEnabled && !canEnableTowerDecoration())}
+                            aria-label="Toggle chair decoration"
+                          >
+                            <span className="tower-chair tower-decoration-option-chair" />
+                          </button>
+                          <button
+                            type="button"
+                            className={towerDecorations.plantEnabled ? 'active' : ''}
+                            onClick={() => toggleTowerDecoration('plant')}
+                            disabled={!towerDecorations.plantEnabled && !canEnableTowerDecoration()}
+                            aria-label="Toggle potted plant decoration"
+                          >
+                            <span className="tower-potted-plant tower-decoration-option-plant" />
+                          </button>
+                        </div>
+                      )}
                       <button
                         type="button"
                         onClick={() => {
                           setTowerAreaPickerOpen((current) => !current);
                           setTowerColorPickerOpen(false);
+                          setTowerDecorationPickerOpen(false);
                         }}
                       >
                         Area
@@ -5545,18 +5708,8 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
                 }`}
                 style={getTowerDecorationStyleForSlot(index)}
               >
-                {getTowerDecorationsForSlot(index).chairEnabled && (
-                  <button
-                    type="button"
-                    className="tower-chair tower-chair-on-tower"
-                    aria-label="Sit on tower chair"
-                    disabled={!localPlayerOwnsTowerSlot(index)}
-                    onPointerDown={(event) => {
-                      event.stopPropagation();
-                      sitOnTowerChair(index);
-                    }}
-                  />
-                )}
+                {getTowerDecorationsForSlot(index).chairEnabled && <span className="tower-chair tower-chair-on-tower" aria-hidden="true" />}
+                {getTowerDecorationsForSlot(index).plantEnabled && <span className="tower-potted-plant tower-potted-plant-on-tower" aria-hidden="true" />}
                 <div className="tower-preview-roof" />
                 <div className="tower-preview-body">
                   <span />
@@ -5804,7 +5957,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
               <div className="shop-item-preview">
                 <span className="tower-chair shop-chair-preview" />
               </div>
-              <p>100 coins</p>
+              <p>{brownChairCost} coins</p>
               <button type="button" disabled={ownsBrownChair || coins < brownChairCost} onClick={buyBrownChair}>
                 {ownsBrownChair ? 'Owned' : 'Buy'}
               </button>
@@ -5814,9 +5967,19 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
               <div className="shop-item-preview">
                 <span className="shop-purple-swatch" />
               </div>
-              <p>20 coins</p>
+              <p>{purpleTowerCost} coins</p>
               <button type="button" disabled={ownsPurpleTower || coins < purpleTowerCost} onClick={buyPurpleTower}>
                 {ownsPurpleTower ? 'Owned' : 'Buy'}
+              </button>
+            </div>
+            <div className="shop-card">
+              <div className="shop-card-title">Pink Tower</div>
+              <div className="shop-item-preview">
+                <span className="shop-pink-swatch" />
+              </div>
+              <p>{pinkTowerCost} coins</p>
+              <button type="button" disabled={ownsPinkTower || coins < pinkTowerCost} onClick={buyPinkTower}>
+                {ownsPinkTower ? 'Owned' : 'Buy'}
               </button>
             </div>
           </div>

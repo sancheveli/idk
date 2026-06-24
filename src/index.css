@@ -956,6 +956,7 @@ button.small {
 
 .tower-chair {
   position: absolute;
+  appearance: none;
   width: 42px;
   height: 34px;
   min-height: 0;
@@ -993,6 +994,44 @@ button.small {
   top: 8px;
   transform: scale(0.72);
   transform-origin: center bottom;
+}
+
+.tower-potted-plant {
+  position: absolute;
+  width: 30px;
+  height: 46px;
+  pointer-events: none;
+}
+
+.tower-potted-plant::before {
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50% 50% 45% 45%;
+  background:
+    radial-gradient(circle at 35% 35%, #86efac 0 26%, transparent 27%),
+    radial-gradient(circle at 66% 28%, #22c55e 0 28%, transparent 29%),
+    radial-gradient(circle at 50% 68%, #16a34a 0 30%, transparent 31%);
+  content: "";
+}
+
+.tower-potted-plant::after {
+  position: absolute;
+  left: 5px;
+  bottom: 0;
+  width: 20px;
+  height: 20px;
+  border: 3px solid #111827;
+  background: linear-gradient(#fb923c, #c2410c);
+  box-shadow: 3px 3px 0 rgba(17, 24, 39, 0.24);
+  content: "";
+}
+
+.tower-potted-plant-preview {
+  right: 36px;
+  top: 7px;
 }
 
 .tower-preview-roof {
@@ -1057,6 +1096,41 @@ button.small {
 .tower-color-swatches button.active {
   outline: 3px solid #ffffff;
   outline-offset: -7px;
+}
+
+.tower-decoration-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tower-decoration-options button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 64px;
+}
+
+.tower-decoration-options button.active {
+  outline: 3px solid #facc15;
+  outline-offset: -7px;
+}
+
+.tower-decoration-options button:disabled {
+  opacity: 0.55;
+}
+
+.tower-decoration-option-chair {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -22%) scale(0.72);
+  transform-origin: center bottom;
+}
+
+.tower-decoration-option-plant {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
 }
 
 .tower-editor-actions button {
@@ -1658,11 +1732,13 @@ button.small {
   z-index: 7;
   transform: scale(0.84);
   transform-origin: center bottom;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
-.terrifying-tower .tower-chair-on-tower:disabled {
-  cursor: default;
+.terrifying-tower .tower-potted-plant-on-tower {
+  right: 28px;
+  top: 2px;
+  z-index: 8;
 }
 
 .terrifying-green-platform {
@@ -2610,6 +2686,14 @@ button.small {
   height: 54px;
   border: 4px solid #111827;
   background: #9333ea;
+  box-shadow: 5px 5px 0 rgba(17, 24, 39, 0.3);
+}
+
+.shop-pink-swatch {
+  width: 54px;
+  height: 54px;
+  border: 4px solid #111827;
+  background: #ec4899;
   box-shadow: 5px 5px 0 rgba(17, 24, 39, 0.3);
 }
 

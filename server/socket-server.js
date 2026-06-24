@@ -20,6 +20,7 @@ const doomsdayDamage = 60;
 const baseStep = 14;
 const rapidStep = 24;
 const towerAirStep = 32;
+const towerMaxAirborneMs = 1200;
 const towerLandingY = 291.5;
 const loweredTowerOffset = 74;
 const towerEdgeInset = 10;
@@ -50,6 +51,7 @@ const defaultDecorations = {
   bodyColor: '#ef4444',
   windowColor: '#bae6fd',
   chairEnabled: false,
+  plantEnabled: false,
   updatedBy: 'server',
   updatedAt: Date.now(),
 };
@@ -132,6 +134,7 @@ function sanitizeDecorations(value, fallback) {
     bodyColor: String(value?.bodyColor || fallback.bodyColor).slice(0, 24),
     windowColor: String(value?.windowColor || fallback.windowColor).slice(0, 24),
     chairEnabled: Boolean(value?.chairEnabled),
+    plantEnabled: Boolean(value?.plantEnabled),
     updatedBy: fallback.updatedBy || 'server',
     updatedAt: Date.now(),
   };
@@ -214,6 +217,7 @@ function resetPlayerRoundState(player, now = Date.now()) {
   player.frozenUntil = 0;
   player.isFat = false;
   player.fallingUntil = 0;
+  player.airborneStartedAt = 0;
   player.rapidUntil = 0;
   player.lastSwordAt = 0;
   player.input = { left: false, right: false, airborne: false };
@@ -756,7 +760,12 @@ function reconcilePlayerPlatforms(room) {
   const now = Date.now();
 
   for (const player of getAlivePlayers(room)) {
-    if (player.input.airborne) continue;
+    if (player.input.airborne) {
+      if (player.airborneStartedAt && now - player.airborneStartedAt < towerMaxAirborneMs) continue;
+
+      player.input = { ...player.input, airborne: false };
+      player.airborneStartedAt = 0;
+    }
 
     const landing = getLandingAt(room, player.position);
     if (!landing) {
@@ -779,6 +788,7 @@ function reconcilePlayerPlatforms(room) {
 
     if (player.fallingUntil) {
       player.fallingUntil = 0;
+      player.airborneStartedAt = 0;
       player.updatedAt = now;
     }
 
@@ -902,6 +912,7 @@ io.on('connection', (socket) => {
         frozenUntil: 0,
         isFat: false,
         fallingUntil: 0,
+        airborneStartedAt: 0,
         lastSwordAt: 0,
       };
 
@@ -919,6 +930,7 @@ io.on('connection', (socket) => {
     player.input = { left: false, right: false, airborne: false };
     player.equippedItem = 'sword';
     player.fallingUntil = 0;
+    player.airborneStartedAt = 0;
     player.slot = slot;
     if (room.phase === 'lobby') {
       player.status = 'ready';
@@ -965,11 +977,18 @@ io.on('connection', (socket) => {
     const player = room.players.get(clientId);
     if (!player) return;
 
-    player.input = {
-      left: Boolean(input.left),
-      right: Boolean(input.right),
-      airborne: Boolean(input.airborne),
-    };
+    player.input = player.fallingUntil
+      ? { left: false, right: false, airborne: false }
+      : {
+          left: Boolean(input.left),
+          right: Boolean(input.right),
+          airborne: Boolean(input.airborne),
+        };
+    if (player.input.airborne) {
+      player.airborneStartedAt ||= Date.now();
+    } else {
+      player.airborneStartedAt = 0;
+    }
     if (
       input.equippedItem === 'sword' ||
       (input.equippedItem === 'pizza' && player.hasPizza) ||
@@ -984,7 +1003,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(socket.data.roomId);
     if (!clientId || !room) return;
     const player = room.players.get(clientId);
-    if (!player || player.status !== 'alive') return;
+    if (!player || player.status !== 'alive' || player.fallingUntil) return;
 
     const requestedPosition = {
       x: Number(payload.position?.x),
@@ -998,6 +1017,7 @@ io.on('connection', (socket) => {
     player.position = { x: landing.x, y: landing.y };
     player.input = { left: false, right: false, airborne: false };
     player.fallingUntil = 0;
+    player.airborneStartedAt = 0;
     player.updatedAt = Date.now();
     broadcastSnapshot(room);
   });
@@ -1027,6 +1047,7 @@ io.on('connection', (socket) => {
     player.status = 'waiting';
     player.input = { left: false, right: false, airborne: false };
     player.fallingUntil = 0;
+    player.airborneStartedAt = 0;
     player.updatedAt = Date.now();
     broadcastSnapshot(room);
     checkRoundEnd(room);
@@ -1040,6 +1061,7 @@ io.on('connection', (socket) => {
     if (!player || player.status !== 'alive') return;
 
     player.input = { left: false, right: false, airborne: false };
+    player.airborneStartedAt = 0;
     player.fallingUntil = Date.now() + voidFallGraceMs;
     player.updatedAt = Date.now();
   });
