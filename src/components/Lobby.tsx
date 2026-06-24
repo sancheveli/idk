@@ -4010,10 +4010,13 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
 
     function tick(now: number) {
       const joystick = mobileJoystickRef.current;
-      if (joystick.active && Math.abs(joystick.x) > 0.16 && canMove && !gameStopped) {
+      const activeAxis = Math.max(Math.abs(joystick.x), Math.abs(joystick.y));
+      if (joystick.active && activeAxis > 0.16 && canMove && !gameStopped) {
         if (now - lastMoveAt >= 80) {
-          const step = movementStep * Math.min(1, Math.max(0.35, Math.abs(joystick.x)));
-          move(joystick.x < 0 ? -step : step, 0);
+          const step = movementStep * Math.min(1, Math.max(0.35, activeAxis));
+          const nextDx = Math.abs(joystick.x) > 0.16 ? joystick.x * step : 0;
+          const nextDy = phase === 'arena' && terrifyingToweringActive ? 0 : Math.abs(joystick.y) > 0.16 ? joystick.y * step : 0;
+          move(nextDx, nextDy);
           lastMoveAt = now;
         }
       }
