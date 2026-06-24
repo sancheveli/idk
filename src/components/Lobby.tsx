@@ -1588,6 +1588,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   const towerJumpLockedRef = useRef(false);
   const towerJumpStartedAtRef = useRef(0);
   const towerJumpStartSlotRef = useRef<number | null>(null);
+  const towerJumpStartYRef = useRef(0);
   const towerSeatedRef = useRef(false);
   const towerPendingLandingRef = useRef<{ position: Position; expiresAt: number } | null>(null);
   const playerShopAccountRef = useRef<PlayerShopAccount>({ coins: 0, owns_brown_chair: false, owns_purple_tower: false });
@@ -1715,13 +1716,19 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       writeSavedTowerDecorations(clientId, nextDecorations);
     }
     setTowerAssignedNickname(authoritativeSelf?.nickname ?? '');
-    setTowerItems({
+    const nextTowerItems = {
       hasSword: Boolean(authoritativeSelf?.hasSword),
       hasPizza: Boolean(authoritativeSelf?.hasPizza),
       hasWarp: Boolean(authoritativeSelf?.hasWarp),
       hp: authoritativeSelf?.hp ?? 100,
       frozenUntil: authoritativeSelf?.frozenUntil ?? 0,
       isFat: Boolean(authoritativeSelf?.isFat),
+    };
+    setTowerItems(nextTowerItems);
+    setEquippedItem((current) => {
+      if (current === 'pizza' && !nextTowerItems.hasPizza) return 'sword';
+      if (current === 'warp' && !nextTowerItems.hasWarp) return 'sword';
+      return current;
     });
     const nextTowerPhase: GamePhase = snapshot.phase === 'arena' && authoritativeSelf?.status === 'alive' ? 'arena' : 'lobby';
     const waitingForActiveRound = snapshot.phase === 'arena' && authoritativeSelf?.status !== 'alive';
@@ -1730,6 +1737,22 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     setRoundEndsAt(waitingForActiveRound ? Date.now() : snapshot.nextEventAt);
     setPhase(nextTowerPhase);
     setTowerWinMessage(snapshot.phase === 'lobby' && snapshot.winnerId === clientId ? 'YOU WIN' : '');
+    if (nextTowerPhase === 'lobby') {
+      const roomClientIds = snapshot.players.map((player) => player.clientId);
+      setPosition(getSpawnPosition('lobby', clientId, roomClientIds));
+      setDirection('front');
+      setEquippedItem('sword');
+      setTowerSeated(false);
+      setTowerVoidFalling(false);
+      setTowerJumpFalling(false);
+      towerInputRef.current = { left: false, right: false, airborne: false, equippedItem: 'sword' };
+      towerAirborneRef.current = false;
+      towerVoidFallingRef.current = false;
+      towerJumpLockedRef.current = false;
+      towerJumpStartYRef.current = 0;
+      towerPendingLandingRef.current = null;
+      pressedKeys.current.clear();
+    }
     if (authoritativeSelf?.falling && nextTowerPhase === 'arena' && !towerVoidFallingRef.current) {
       triggerTowerVoidFall();
       return;
@@ -3972,6 +3995,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     towerJumpLockedRef.current = false;
     towerAirborneRef.current = false;
     towerSeatedRef.current = false;
+    towerJumpStartYRef.current = 0;
     towerPendingLandingRef.current = null;
     setTowerSeated(false);
     setTowerJumpOffset(0);
@@ -4152,21 +4176,27 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
   }
 
   function getTerrifyingToweringLandingForJump(positionToLand: Position, effects = towerEffects) {
+    const jumpApexY = (towerJumpStartYRef.current || positionToLand.y) - terrifyingToweringJumpDistance;
     const landingPlatform = getTerrifyingToweringPlatformWorldBoundsList(effects)
+      .map((platform) => ({
+        ...platform,
+        landingY: getTerrifyingToweringPlatformLandingY(platform),
+      }))
       .filter((platform) => {
         if (platform.hidden) return false;
         return (
-        positionToLand.x >= platform.left + terrifyingToweringTowerEdgeInset - terrifyingToweringFootSupportMargin &&
-        positionToLand.x <= platform.right - terrifyingToweringTowerEdgeInset + terrifyingToweringFootSupportMargin
+          platform.landingY >= jumpApexY - 2 &&
+          positionToLand.x >= platform.left + terrifyingToweringTowerEdgeInset - terrifyingToweringFootSupportMargin &&
+          positionToLand.x <= platform.right - terrifyingToweringTowerEdgeInset + terrifyingToweringFootSupportMargin
         );
       })
-      .sort((first, second) => getTerrifyingToweringPlatformLandingY(second) - getTerrifyingToweringPlatformLandingY(first))[0];
+      .sort((first, second) => first.landingY - second.landingY)[0];
 
     if (!landingPlatform) return null;
 
     return {
       x: clamp(positionToLand.x, landingPlatform.left + terrifyingToweringTowerEdgeInset, landingPlatform.right - terrifyingToweringTowerEdgeInset),
-      y: getTerrifyingToweringPlatformLandingY(landingPlatform),
+      y: landingPlatform.landingY,
       slot: landingPlatform.slot,
     };
   }
@@ -4195,6 +4225,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     towerAirborneRef.current = false;
     towerJumpStartSlotRef.current = null;
     towerJumpStartedAtRef.current = 0;
+    towerJumpStartYRef.current = 0;
     updateTowerInput({ left: false, right: false, airborne: false });
     towerSocketRef.current?.emit('tower:land', { position: landing });
     window.setTimeout(() => {
@@ -4448,6 +4479,22 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     towerSocketRef.current?.emit('tower:input', syncedInput);
   }
 
+  function setTowerEquippedItem(item: 'sword' | 'pizza' | 'warp') {
+    setEquippedItem(item);
+    const syncedInput = { ...towerInputRef.current, equippedItem: item };
+    towerInputRef.current = syncedInput;
+    towerSocketRef.current?.emit('tower:input', syncedInput);
+  }
+
+  function useTowerPizza() {
+    if (equippedItem !== 'pizza') {
+      setTowerEquippedItem('pizza');
+      return;
+    }
+
+    towerSocketRef.current?.emit('tower:pizza');
+  }
+
   function stopTowerInput() {
     updateTowerInput({ left: false, right: false, airborne: false });
   }
@@ -4698,6 +4745,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     towerAirborneRef.current = true;
     towerJumpStartedAtRef.current = Date.now();
     towerJumpStartSlotRef.current = startLanding.slot;
+    towerJumpStartYRef.current = startLanding.y;
     setTowerJumpFalling(false);
     setTowerVoidFalling(false);
     setTowerVoidFallOffset(0);
@@ -4732,6 +4780,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     towerAirborneRef.current = false;
     towerJumpStartSlotRef.current = null;
     towerJumpStartedAtRef.current = 0;
+    towerJumpStartYRef.current = 0;
     if (towerJumpTimerRef.current) {
       window.clearTimeout(towerJumpTimerRef.current);
       towerJumpTimerRef.current = null;
@@ -4956,6 +5005,13 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
           falling: player.falling,
         })),
     [clientId, towerRemotePlayers, towerServerNow],
+  );
+  const towerLobbyPlayers = useMemo(
+    () =>
+      towerRemotePlayers
+        .filter((player) => player.connected && (phase === 'lobby' || player.status !== 'alive'))
+        .sort((a, b) => a.slot - b.slot || a.nickname.localeCompare(b.nickname)),
+    [phase, towerRemotePlayers],
   );
   const towerDecorationStyle = {
     '--tower-roof-color': towerDecorations.roofColor,
@@ -5333,6 +5389,30 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
         )}
       </div>
 
+      {terrifyingToweringActive && phase === 'lobby' && (
+        <div className="tower-lobby-roster" aria-label="Tower lobby players">
+          <div className="tower-lobby-roster-header">
+            <span>Lobby players</span>
+            <strong>{towerLobbyPlayers.length}/{towerMaxPlayers}</strong>
+          </div>
+          <div className="tower-lobby-roster-list">
+            {towerLobbyPlayers.length > 0 ? (
+              towerLobbyPlayers.map((player) => (
+                <span key={player.clientId} className={player.clientId === clientId ? 'self' : ''}>
+                  <strong>{player.clientId === clientId ? `${player.nickname} (you)` : player.nickname}</strong>
+                  <em>{player.status === 'ready' ? 'Ready' : 'Waiting'}</em>
+                </span>
+              ))
+            ) : (
+              <span>
+                <strong>Connecting...</strong>
+                <em>Waiting</em>
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {phase === 'arena' && deathMessage && (
         <div className="death-announcement" role="status" aria-live="assertive">
           {deathMessage}
@@ -5675,7 +5755,7 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
           <div className="player-inventory" aria-label="Player inventory" onClick={(event) => event.stopPropagation()}>
             <span>Inventory</span>
             {(terrifyingToweringActive ? towerItems.hasSword : hasSword) && (
-              <button type="button" className={equippedItem === 'sword' ? 'active' : ''} onClick={() => setEquippedItem('sword')}>
+              <button type="button" className={equippedItem === 'sword' ? 'active' : ''} onClick={() => (terrifyingToweringActive ? setTowerEquippedItem('sword') : setEquippedItem('sword'))}>
                 Sword
               </button>
             )}
@@ -5685,12 +5765,12 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
               </button>
             )}
             {terrifyingToweringActive && towerItems.hasPizza && (
-              <button type="button" className={equippedItem === 'pizza' ? 'active' : ''} onClick={() => setEquippedItem('pizza')}>
+              <button type="button" className={equippedItem === 'pizza' ? 'active' : ''} onClick={useTowerPizza}>
                 Pizza
               </button>
             )}
             {terrifyingToweringActive && towerItems.hasWarp && (
-              <button type="button" className={equippedItem === 'warp' ? 'active' : ''} onClick={() => setEquippedItem('warp')}>
+              <button type="button" className={equippedItem === 'warp' ? 'active' : ''} onClick={() => setTowerEquippedItem('warp')}>
                 Warp
               </button>
             )}

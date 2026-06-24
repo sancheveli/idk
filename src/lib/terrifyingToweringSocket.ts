@@ -80,6 +80,7 @@ type ClientToServerEvents = {
   'tower:falling': () => void;
   'tower:die': () => void;
   'tower:warp': (payload: { targetClientId: string }) => void;
+  'tower:pizza': () => void;
   'tower:sword': () => void;
 };
 

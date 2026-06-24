@@ -15,6 +15,8 @@ const voidFallGraceMs = 1000;
 const swordDamage = 5;
 const swordCooldownMs = 2000;
 const swordRange = 86;
+const pizzaHealAmount = 50;
+const doomsdayDamage = 60;
 const baseStep = 14;
 const rapidStep = 24;
 const towerAirStep = 32;
@@ -190,6 +192,7 @@ function createRoom() {
     bombs: [],
     explosions: [],
     doomsdayStrikes: [],
+    damagedDoomsdayStrikes: new Set(),
     missiles: [],
   };
 
@@ -200,6 +203,32 @@ function createRoom() {
 
 function getConnectedPlayers(room) {
   return Array.from(room.players.values()).filter((player) => player.connected);
+}
+
+function resetPlayerRoundState(player, now = Date.now()) {
+  player.hp = 100;
+  player.hasSword = false;
+  player.hasPizza = false;
+  player.hasWarp = false;
+  player.equippedItem = 'sword';
+  player.frozenUntil = 0;
+  player.isFat = false;
+  player.fallingUntil = 0;
+  player.rapidUntil = 0;
+  player.lastSwordAt = 0;
+  player.input = { left: false, right: false, airborne: false };
+  player.updatedAt = now;
+}
+
+function clearRoomRoundEffects(room) {
+  room.usedDoomsday = false;
+  room.loweredTowers = [];
+  room.hiddenTowers = [];
+  room.bombs = [];
+  room.explosions = [];
+  room.doomsdayStrikes = [];
+  room.damagedDoomsdayStrikes = new Set();
+  room.missiles = [];
 }
 
 function getActivePlayers(room) {
@@ -231,19 +260,17 @@ function pauseEmptyRoom(room, now = Date.now()) {
   room.nextEventAt = room.lobbyEndsAt;
   room.winnerId = '';
   room.winnerName = '';
-  room.usedDoomsday = false;
-  room.loweredTowers = [];
-  room.hiddenTowers = [];
-  room.bombs = [];
-  room.explosions = [];
-  room.doomsdayStrikes = [];
-  room.missiles = [];
+  clearRoomRoundEffects(room);
   room.currentEvent = {
     id: `waiting-${room.id}-${now}`,
     message: 'Waiting for next round...',
     selectedAt: now,
     slot: room.eventSlot,
   };
+
+  for (const player of room.players.values()) {
+    resetPlayerRoundState(player, now);
+  }
 }
 
 function getReservablePlayers(room) {
@@ -369,6 +396,12 @@ function isOnPlatform(room, position) {
   return Boolean(landing && Math.abs(position.y - landing.y) <= 1);
 }
 
+function playerIsOnTowerSlot(room, player, slot) {
+  if (player.input?.airborne) return false;
+  const landing = getLandingAt(room, player.position);
+  return Boolean(landing && landing.slot === slot && Math.abs(player.position.y - landing.y) <= 1);
+}
+
 function serializePlayer(player) {
   return {
     clientId: player.clientId,
@@ -452,12 +485,46 @@ function getAlivePlayers(room) {
   return Array.from(room.players.values()).filter((player) => player.status === 'alive' && player.connected);
 }
 
+function hashSeed(value) {
+  const text = String(value);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function createSeededRandom(seed) {
+  let state = hashSeed(seed);
+  return () => {
+    state += 0x6d2b79f5;
+    let next = state;
+    next = Math.imul(next ^ (next >>> 15), next | 1);
+    next ^= next + Math.imul(next ^ (next >>> 7), next | 61);
+    return ((next ^ (next >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 function getRandomItems(items, count, seed = Date.now()) {
+  const random = createSeededRandom(seed);
   return [...items]
-    .map((item, index) => ({ item, sort: Math.sin(seed + index * 999) }))
+    .map((item) => ({ item, sort: random() }))
     .sort((a, b) => a.sort - b.sort)
-    .slice(0, count)
+    .slice(0, Math.max(0, count))
     .map(({ item }) => item);
+}
+
+function getEventSeed(room, now, context) {
+  return `${room.id}:${room.eventSlot}:${now}:${context}`;
+}
+
+function chooseTowerSlots(room, count, now, context, slots = [0, 1, 2, 3, 4]) {
+  return getRandomItems(slots, count, getEventSeed(room, now, context));
+}
+
+function chooseAlivePlayers(room, count, now, context) {
+  return getRandomItems(getAlivePlayers(room), count, getEventSeed(room, now, context));
 }
 
 function damagePlayer(player, amount, room) {
@@ -476,25 +543,28 @@ function applyTowerEvent(room, message, now = Date.now()) {
   if (alivePlayers.length === 0) return;
 
   if (message === 'Someone gets a sword') {
-    getRandomItems(alivePlayers, 1, now)[0].hasSword = true;
+    const player = chooseAlivePlayers(room, 1, now, 'sword')[0];
+    if (player) player.hasSword = true;
     return;
   }
 
   if (message === 'Two towers are lowered') {
-    room.loweredTowers = getRandomItems([0, 1, 2, 3, 4], 2, now).map((slot) => ({ slot, until: now + loweredTowerDurationMs }));
+    room.loweredTowers = chooseTowerSlots(room, 2, now, 'lowered-towers').map((slot) => ({ slot, until: now + loweredTowerDurationMs }));
     return;
   }
 
   if (message === 'Someones tower will disappear') {
     const hiddenSlots = new Set(room.hiddenTowers.map((effect) => effect.slot));
     const availableSlots = [0, 1, 2, 3, 4].filter((slot) => !hiddenSlots.has(slot));
-    const nextSlot = getRandomItems(availableSlots.length > 0 ? availableSlots : [0, 1, 2, 3, 4], 1, now)[0];
+    const nextSlot = chooseTowerSlots(room, 1, now, 'hidden-tower', availableSlots.length > 0 ? availableSlots : [0, 1, 2, 3, 4])[0];
+    if (nextSlot === undefined) return;
     room.hiddenTowers = [...room.hiddenTowers.filter((effect) => effect.slot !== nextSlot), { slot: nextSlot, until: hiddenTowerUntilRoundEnd }];
     return;
   }
 
   if (message === 'A bomb will detonate soon') {
-    const slot = getRandomItems([0, 1, 2, 3, 4], 1, now)[0];
+    const slot = chooseTowerSlots(room, 1, now, 'bomb')[0];
+    if (slot === undefined) return;
     const spawn = getSpawnPosition(slot);
     room.bombs.push({ id: `bomb-${now}`, slot, x: spawn.x, y: spawn.y - 72, spawnedAt: now, explodesAt: now + 30000 });
     return;
@@ -502,7 +572,7 @@ function applyTowerEvent(room, message, now = Date.now()) {
 
   if (message === 'everyday im shuffling') {
     const positions = alivePlayers.map((player) => player.position);
-    const shuffled = getRandomItems(positions, positions.length, now);
+    const shuffled = getRandomItems(positions, positions.length, getEventSeed(room, now, 'shuffle'));
     alivePlayers.forEach((player, index) => {
       player.position = shuffled[index] || player.position;
       player.updatedAt = now;
@@ -519,26 +589,30 @@ function applyTowerEvent(room, message, now = Date.now()) {
 
   if (message === 'SURVIVE THE DOOMSDAY') {
     room.usedDoomsday = true;
-    const slots = getRandomItems([0, 1, 2, 3, 4], 2, now);
+    const slots = chooseTowerSlots(room, 2, now, 'doomsday');
+    if (slots.length === 0) return;
     room.doomsdayStrikes.push(
       { id: `tower-doom-${now}-1`, slot: slots[0], warningAt: now, hitAt: now + 3000, endsAt: now + 3900 },
-      { id: `tower-doom-${now}-2`, slot: slots[1], warningAt: now + 3000, hitAt: now + 6000, endsAt: now + 6900 },
+      { id: `tower-doom-${now}-2`, slot: slots[1] ?? slots[0], warningAt: now + 3000, hitAt: now + 6000, endsAt: now + 6900 },
     );
     return;
   }
 
   if (message === "A warp tool is teleporting into someone's hands") {
-    getRandomItems(alivePlayers, 1, now)[0].hasWarp = true;
+    const player = chooseAlivePlayers(room, 1, now, 'warp')[0];
+    if (player) player.hasWarp = true;
     return;
   }
 
   if (message === 'Freeze') {
-    getRandomItems(alivePlayers, 1, now)[0].frozenUntil = now + freezeDurationMs;
+    const player = chooseAlivePlayers(room, 1, now, 'freeze')[0];
+    if (player) player.frozenUntil = now + freezeDurationMs;
     return;
   }
 
   if (message === 'Someone ate too many whoppers') {
-    const player = getRandomItems(alivePlayers, 1, now)[0];
+    const player = chooseAlivePlayers(room, 1, now, 'whopper')[0];
+    if (!player) return;
     player.isFat = true;
     player.hp = 150;
     return;
@@ -546,7 +620,7 @@ function applyTowerEvent(room, message, now = Date.now()) {
 
   if (message === 'Deadly missles are coming for you!') {
     const targetCount = alivePlayers.length >= 4 ? 2 : 1;
-    getRandomItems(alivePlayers, targetCount, now).forEach((player) => {
+    chooseAlivePlayers(room, targetCount, now, 'missiles').forEach((player) => {
       room.missiles.push({ id: `missile-${now}-${player.clientId}`, targetClientId: player.clientId, launchedAt: now, hitAt: now + 4000 });
     });
   }
@@ -563,6 +637,7 @@ function startRound(room, now = Date.now()) {
     room.phase = 'lobby';
     room.lobbyEndsAt = now + lobbyDurationMs;
     room.nextEventAt = room.lobbyEndsAt;
+    clearRoomRoundEffects(room);
     room.currentEvent = {
       id: `waiting-for-players-${room.id}-${now}`,
       message: 'Waiting for more players...',
@@ -570,9 +645,8 @@ function startRound(room, now = Date.now()) {
       slot: room.eventSlot,
     };
     for (const player of room.players.values()) {
+      resetPlayerRoundState(player, now);
       player.status = player.connected ? 'ready' : 'waiting';
-      player.input = { left: false, right: false, airborne: false };
-      player.updatedAt = now;
     }
     console.log('[tower:round-waiting]', {
       roomId: room.id,
@@ -591,13 +665,7 @@ function startRound(room, now = Date.now()) {
   room.roundPlayerCount = participatingPlayers.length;
   room.winnerId = '';
   room.winnerName = '';
-  room.usedDoomsday = false;
-  room.loweredTowers = [];
-  room.hiddenTowers = [];
-  room.bombs = [];
-  room.explosions = [];
-  room.doomsdayStrikes = [];
-  room.missiles = [];
+  clearRoomRoundEffects(room);
   room.currentEvent = {
     id: `round-${room.id}-${now}`,
     message: 'Arena events starting...',
@@ -613,19 +681,10 @@ function startRound(room, now = Date.now()) {
 
   for (const player of room.players.values()) {
     if (player.connected) {
+      resetPlayerRoundState(player, now);
       player.status = 'alive';
-      player.hp = 100;
-      player.hasSword = false;
-      player.hasPizza = false;
-      player.hasWarp = false;
-      player.equippedItem = 'sword';
-      player.frozenUntil = 0;
-      player.isFat = false;
-      player.fallingUntil = 0;
       player.position = getSpawnPosition(player.slot);
       player.direction = 'front';
-      player.input = { left: false, right: false, airborne: false };
-      player.updatedAt = now;
     } else {
       player.status = 'waiting';
     }
@@ -640,6 +699,7 @@ function endRound(room, winner, now = Date.now()) {
   room.nextEventAt = room.lobbyEndsAt;
   room.winnerId = winner?.clientId || '';
   room.winnerName = winner?.nickname || '';
+  clearRoomRoundEffects(room);
   room.currentEvent = {
     id: `round-over-${room.id}-${now}`,
     message: winner ? `${winner.nickname} wins` : 'Round over',
@@ -648,9 +708,8 @@ function endRound(room, winner, now = Date.now()) {
   };
 
   for (const player of room.players.values()) {
+    resetPlayerRoundState(player, now);
     player.status = player.connected ? 'ready' : 'waiting';
-    player.input = { left: false, right: false, airborne: false };
-    player.updatedAt = now;
   }
 
   broadcastSnapshot(room);
@@ -733,9 +792,23 @@ function reconcilePlayerPlatforms(room) {
 }
 
 function updateTimedTowerEffects(room, now = Date.now()) {
+  room.damagedDoomsdayStrikes ||= new Set();
+  room.doomsdayStrikes.forEach((strike) => {
+    if (now < strike.hitAt || room.damagedDoomsdayStrikes.has(strike.id)) return;
+
+    room.damagedDoomsdayStrikes.add(strike.id);
+    getAlivePlayers(room).forEach((player) => {
+      if (playerIsOnTowerSlot(room, player, strike.slot)) {
+        damagePlayer(player, doomsdayDamage, room);
+      }
+    });
+  });
+
   room.loweredTowers = room.loweredTowers.filter((effect) => now < effect.until);
   room.explosions = room.explosions.filter((effect) => now < effect.endsAt);
   room.doomsdayStrikes = room.doomsdayStrikes.filter((effect) => now < effect.endsAt);
+  const activeDoomsdayIds = new Set(room.doomsdayStrikes.map((strike) => strike.id));
+  room.damagedDoomsdayStrikes = new Set([...room.damagedDoomsdayStrikes].filter((id) => activeDoomsdayIds.has(id)));
 
   const explodingBombs = room.bombs.filter((bomb) => now >= bomb.explodesAt);
   room.bombs = room.bombs.filter((bomb) => now < bomb.explodesAt);
@@ -868,6 +941,12 @@ io.on('connection', (socket) => {
       room.nextEventAt = room.lobbyEndsAt;
       room.winnerId = '';
       room.winnerName = '';
+      clearRoomRoundEffects(room);
+      for (const roomPlayer of room.players.values()) {
+        resetPlayerRoundState(roomPlayer, now);
+        roomPlayer.status = roomPlayer.connected ? 'ready' : 'waiting';
+        roomPlayer.position = getSpawnPosition(roomPlayer.slot);
+      }
       room.currentEvent = {
         id: `waiting-${room.id}-${now}`,
         message: 'Waiting for next round...',
@@ -891,7 +970,11 @@ io.on('connection', (socket) => {
       right: Boolean(input.right),
       airborne: Boolean(input.airborne),
     };
-    if (['sword', 'pizza', 'warp'].includes(input.equippedItem)) {
+    if (
+      input.equippedItem === 'sword' ||
+      (input.equippedItem === 'pizza' && player.hasPizza) ||
+      (input.equippedItem === 'warp' && player.hasWarp)
+    ) {
       player.equippedItem = input.equippedItem;
     }
   });
@@ -970,6 +1053,21 @@ io.on('connection', (socket) => {
     if (!player || !target || !player.hasWarp || player.status !== 'alive' || target.status !== 'alive') return;
 
     player.position = { ...target.position };
+    player.updatedAt = Date.now();
+    broadcastSnapshot(room);
+  });
+
+  socket.on('tower:pizza', () => {
+    const clientId = socket.data.clientId;
+    const room = rooms.get(socket.data.roomId);
+    if (!clientId || !room) return;
+    const player = room.players.get(clientId);
+    if (!player || !player.hasPizza || player.status !== 'alive') return;
+
+    const maxHp = player.isFat ? 150 : 100;
+    player.hp = Math.min(maxHp, (player.hp ?? maxHp) + pizzaHealAmount);
+    player.hasPizza = false;
+    player.equippedItem = 'sword';
     player.updatedAt = Date.now();
     broadcastSnapshot(room);
   });

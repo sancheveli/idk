@@ -1331,6 +1331,56 @@ button.small {
   font-weight: 800;
 }
 
+.tower-lobby-roster {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 2px solid #111827;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 4px 4px 0 rgba(17, 24, 39, 0.2);
+}
+
+.tower-lobby-roster-header,
+.tower-lobby-roster-list span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tower-lobby-roster-header {
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.tower-lobby-roster-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tower-lobby-roster-list span {
+  min-width: 150px;
+  padding: 7px 9px;
+  border: 1px solid #111827;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.tower-lobby-roster-list span.self {
+  background: #fef3c7;
+}
+
+.tower-lobby-roster-list em {
+  color: #4b5563;
+  font-style: normal;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .round-info {
   display: grid;
   min-width: 132px;
