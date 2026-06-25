@@ -1773,11 +1773,6 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       towerPendingLandingRef.current = null;
       pressedKeys.current.clear();
     }
-    if (authoritativeSelf?.falling && nextTowerPhase === 'arena' && !towerVoidFallingRef.current) {
-      triggerTowerVoidFall();
-      return;
-    }
-
     const pendingLanding = towerPendingLandingRef.current;
     if (authoritativeSelf && pendingLanding) {
       const landingConfirmed =
@@ -1785,8 +1780,16 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
       if (landingConfirmed || Date.now() > pendingLanding.expiresAt) {
         towerPendingLandingRef.current = null;
       } else {
+        if (authoritativeSelf.falling) {
+          towerSocketRef.current?.emit('tower:land', { position: pendingLanding.position });
+        }
         return;
       }
+    }
+
+    if (authoritativeSelf?.falling && nextTowerPhase === 'arena' && !towerVoidFallingRef.current) {
+      triggerTowerVoidFall();
+      return;
     }
 
     if (
@@ -4320,8 +4323,8 @@ export function Lobby({ nickname = 'Player', userId, onMenuOpenChange, onSignOut
     towerJumpStartSlotRef.current = null;
     towerJumpStartedAtRef.current = 0;
     towerJumpStartYRef.current = 0;
-    updateTowerInput({ left: false, right: false, airborne: false });
     towerSocketRef.current?.emit('tower:land', { position: landing });
+    updateTowerInput({ left: false, right: false, airborne: false });
     window.setTimeout(() => {
       if (!towerPendingLandingRef.current) return;
       towerSocketRef.current?.emit('tower:land', { position: towerPendingLandingRef.current.position });

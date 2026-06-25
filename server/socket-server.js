@@ -1003,7 +1003,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(socket.data.roomId);
     if (!clientId || !room) return;
     const player = room.players.get(clientId);
-    if (!player || player.status !== 'alive' || player.fallingUntil) return;
+    if (!player || player.status !== 'alive') return;
 
     const requestedPosition = {
       x: Number(payload.position?.x),
